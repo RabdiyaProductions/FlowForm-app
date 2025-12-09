@@ -1,1 +1,104 @@
+/* GLOBAL */
+body {
+    margin: 0;
+        padding: 0;
+            font-family: Arial, sans-serif;
+                background: #111;
+                    color: #fff;
+                    }
 
+                    /* NAVIGATION */
+                    .navbar {
+                        display: flex;
+                            justify-content: space-between;
+                                align-items: center;
+                                    padding: 20px;
+                                        background: #000;
+                                            border-bottom: 1px solid #444;
+                                            }
+
+                                            .navbar .logo {
+                                                font-size: 24px;
+                                                    font-weight: bold;
+                                                        letter-spacing: 1px;
+                                                        }
+
+                                                        .navbar nav a {
+                                                            margin-left: 20px;
+                                                                color: #fff;
+                                                                    text-decoration: none;
+                                                                        font-size: 16px;
+                                                                        }
+
+                                                                        .navbar nav a.active,
+                                                                        .navbar nav a:hover {
+                                                                            color: #0ef;
+                                                                            }
+
+                                                                            /* HERO SECTION */
+                                                                            .hero {
+                                                                                text-align: center;
+                                                                                    padding: 120px 20px;
+                                                                                        background: linear-gradient(155deg, #0ef, #0066ff, #111);
+                                                                                        }
+
+                                                                                        .hero h1 {
+                                                                                            font-size: 48px;
+                                                                                                margin-bottom: 10px;
+                                                                                                }
+
+                                                                                                .hero p {
+                                                                                                    font-size: 20px;
+                                                                                                    }
+
+                                                                                                    /* BUTTONS */
+                                                                                                    .btn {
+                                                                                                        background: #0ef;
+                                                                                                            color: #000;
+                                                                                                                padding: 12px 24px;
+                                                                                                                    border: none;
+                                                                                                                        margin-top: 20px;
+                                                                                                                            font-weight: bold;
+                                                                                                                                border-radius: 6px;
+                                                                                                                                    cursor: pointer;
+                                                                                                                                    }
+
+                                                                                                                                    .btn:hover {
+                                                                                                                                        background: #00c2d9;
+                                                                                                                                        }
+
+                                                                                                                                        /* CLASS PAGE */
+                                                                                                                                        .classes-hero {
+                                                                                                                                            text-align: center;
+                                                                                                                                                padding: 60px 20px;
+                                                                                                                                                    background: #222;
+                                                                                                                                                    }
+
+                                                                                                                                                    .class-grid {
+                                                                                                                                                        display: grid;
+                                                                                                                                                            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                                                                                                                                                                gap: 20px;
+                                                                                                                                                                    padding: 40px;
+                                                                                                                                                                    }
+
+                                                                                                                                                                    .class-card {
+                                                                                                                                                                        background: #1a1a1a;
+                                                                                                                                                                            border-radius: 10px;
+                                                                                                                                                                                padding: 20px;
+                                                                                                                                                                                    text-align: center;
+                                                                                                                                                                                        border: 1px solid #333;
+                                                                                                                                                                                        }
+
+                                                                                                                                                                                        .class-card h3 {
+                                                                                                                                                                                            margin-top: 0;
+                                                                                                                                                                                                color: #0ef;
+                                                                                                                                                                                                }
+
+                                                                                                                                                                                                .footer {
+                                                                                                                                                                                                    text-align: center;
+                                                                                                                                                                                                        padding: 20px;
+                                                                                                                                                                                                            background: #000;
+                                                                                                                                                                                                                margin-top: 40px;
+                                                                                                                                                                                                                    font-size: 14px;
+                                                                                                                                                                                                                        border-top: 1px solid #333;
+                                                                                                                                                                                                                        }
