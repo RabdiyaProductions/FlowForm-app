@@ -1,3 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FlowForm Vitality — App Store</title>
+  <style>
+    body{font-family:system-ui,Arial;margin:0;background:#0b0f14;color:#e8eef6}
+    header{padding:20px 18px;border-bottom:1px solid #1a2230;display:flex;gap:12px;align-items:center;justify-content:space-between}
+    .wrap{max-width:1100px;margin:0 auto;padding:18px}
+    a{color:#9bd1ff;text-decoration:none}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:14px}
+    .card{border:1px solid #1a2230;border-radius:14px;padding:14px;background:#0f1621}
+    .btn{display:inline-block;padding:10px 12px;border-radius:12px;border:1px solid #2a3a52;background:#101a29}
+    .btn.primary{background:#17304a;border-color:#2a6cb0}
+    .tag{display:inline-block;font-size:12px;opacity:.8;margin-top:6px}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <b style="font-size:18px">FlowForm Vitality — App Store</b><br/>
+      <span style="opacity:.8;font-size:12px">Pick a flow → subscribe → start today</span>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <a href="#help">Help</a>
+      <a href="#chat">Chat</a>
+      <a href="{{FLOWFORM_SUBSCRIPTION_STRIPE_LINK}}">Subscribe</a>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="grid">
+      <div class="card">
+        <h3>FlowForm Core</h3>
+        <p>Today’s Flow + Library + Programs + Progress.</p>
+        <div><a class="btn primary" href="{{FLOWFORM_CORE_APP_LINK}}">Open App</a> <a class="btn" href="{{FLOWFORM_CORE_STRIPE_LINK}}">Subscribe</a></div>
+        <div class="tag">Basic / Standard / Premium tiers</div>
+      </div>
+
+      <div class="card"><h3>Balance Flow</h3><p>Stability and control. Great for beginners.</p>
+        <div><a class="btn primary" href="{{BALANCE_APP_LINK}}">Open</a> <a class="btn" href="{{BALANCE_STRIPE_LINK}}">Subscribe</a></div></div>
+
+      <div class="card"><h3>Yoga Flow</h3><p>Mobility and recovery.</p>
+        <div><a class="btn primary" href="{{YOGA_APP_LINK}}">Open</a> <a class="btn" href="{{YOGA_STRIPE_LINK}}">Subscribe</a></div></div>
+
+      <div class="card"><h3>Boxing Flow</h3><p>Footwork + conditioning.</p>
+        <div><a class="btn primary" href="{{BOXING_APP_LINK}}">Open</a> <a class="btn" href="{{BOXING_STRIPE_LINK}}">Subscribe</a></div></div>
+
+      <div class="card"><h3>Hit Flow</h3><p>Short intense sessions.</p>
+        <div><a class="btn primary" href="{{HIT_APP_LINK}}">Open</a> <a class="btn" href="{{HIT_STRIPE_LINK}}">Subscribe</a></div></div>
+
+      <div class="card"><h3>Combat Flow</h3><p>Martial-inspired movement + cardio.</p>
+        <div><a class="btn primary" href="{{COMBAT_APP_LINK}}">Open</a> <a class="btn" href="{{COMBAT_STRIPE_LINK}}">Subscribe</a></div></div>
+
+      <div class="card">
+        <h3>3D Tai Chi</h3>
+        <p>Premium 3D guided forms & practice mode.</p>
+        <div><span class="tag">Coming soon (structure ready, tech in progress)</span></div>
+      </div>
+    </div>
+
+    <div id="help" class="card" style="margin-top:14px">
+      <h3>Help</h3>
+      <p>New here? Start with FlowForm Core → Beginner → 7-Day Calm. Aim 10–20 mins/day.</p>
+    </div>
+
+    <div id="chat" class="card" style="margin-top:14px">
+      <h3>Chat</h3>
+      <p><a href="mailto:support@YOURDOMAIN?subject=FlowForm%20Support">Support</a> · <a href="{{FLOWFORM_CHATBOT_LINK}}">Open Bot</a></p>
+    </div>
+  </div>
+</body>
+</html>
 <!DOCTYPE html>
 <section class="cta-block">
       <div class="container">
