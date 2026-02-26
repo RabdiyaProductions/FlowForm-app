@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Dashboard</h1>
+  <p class="muted">Sustainable training: intensity and recovery in balance.</p>
+</div>
+<div class="grid grid-3">
+  <div class="card"><div class="muted">Session Templates</div><h2>{{ sessions_count }}</h2></div>
+  <div class="card"><div class="muted">Completed Runs</div><h2>{{ completed_runs }}</h2></div>
+  <div class="card"><div class="muted">Total Minutes</div><h2>{{ total_minutes }}</h2></div>
+</div>
+<div class="card">
+  <a class="btn" href="/sessions">Start from Sessions Library</a>
+</div>
+{% endblock %}

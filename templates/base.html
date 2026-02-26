@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ title or 'FlowForm' }}</title>
+  <style>
+    :root { --bg:#0b1220; --card:#111a2e; --text:#e8f0ff; --muted:#8ea2c7; --accent:#1aa6a6; --border:#21304f; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial; background:var(--bg); color:var(--text); }
+    a { color:#9ad7ff; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    .wrap { max-width: 1080px; margin:0 auto; padding:20px 16px; }
+    .nav { display:flex; gap:16px; flex-wrap:wrap; margin-bottom:16px; }
+    .nav a { padding:8px 10px; border:1px solid var(--border); border-radius:10px; background:#0f182b; }
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:16px; margin-bottom:14px; }
+    .grid { display:grid; gap:12px; }
+    .grid-3 { grid-template-columns: repeat(3, minmax(0,1fr)); }
+    .btn { background:var(--accent); border:none; color:#fff; padding:10px 12px; border-radius:10px; cursor:pointer; }
+    input, textarea, select { width:100%; background:#0d1628; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:10px; }
+    table { width:100%; border-collapse: collapse; }
+    th, td { border-bottom:1px solid var(--border); padding:8px 6px; text-align:left; }
+    .muted { color: var(--muted); }
+    @media (max-width:800px){ .grid-3{grid-template-columns:1fr;} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="nav">
+      <a href="/dashboard">Dashboard</a>
+      <a href="/sessions">Sessions</a>
+      <a href="/progress">Progress</a>
+      <a href="/settings">Settings</a>
+      <a href="/ready">Ready</a>
+    </nav>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

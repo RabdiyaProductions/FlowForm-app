@@ -1,0 +1,57 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Sessions Library</h1>
+  <p class="muted">Create templates and launch a structured session player.</p>
+</div>
+
+<div class="card">
+  <h3>Create Session Template</h3>
+  <div class="grid">
+    <input id="title" placeholder="Session title" />
+    <input id="duration" type="number" min="5" value="30" placeholder="Duration minutes" />
+    <input id="intensity" placeholder="Intensity (Low/Moderate/High)" value="Moderate" />
+    <textarea id="steps" rows="4" placeholder='Steps JSON e.g. [{"name":"Warm-up","seconds":300}]'></textarea>
+    <button class="btn" id="createBtn">Create Session</button>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Templates</h3>
+  <table>
+    <thead><tr><th>Title</th><th>Duration</th><th>Intensity</th><th>Player</th></tr></thead>
+    <tbody>
+      {% for s in sessions %}
+      <tr>
+        <td>{{ s.title }}</td>
+        <td>{{ s.duration_minutes }} min</td>
+        <td>{{ s.intensity }}</td>
+        <td><a href="/player/{{ s.id }}">Start Session</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+document.getElementById('createBtn').addEventListener('click', async () => {
+  let steps;
+  try { steps = JSON.parse(document.getElementById('steps').value || '[]'); }
+  catch { alert('Invalid steps JSON'); return; }
+
+  const payload = {
+    title: document.getElementById('title').value,
+    duration_minutes: Number(document.getElementById('duration').value),
+    intensity: document.getElementById('intensity').value,
+    steps
+  };
+  const res = await fetch('/api/sessions', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) { alert('Failed to create session'); return; }
+  window.location.reload();
+});
+</script>
+{% endblock %}
