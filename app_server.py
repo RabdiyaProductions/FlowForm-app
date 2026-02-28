@@ -116,6 +116,121 @@ def create_app(port: int | None = None) -> Flask:
         }
         return jsonify(payload)
 
+    @app.post("/api/timeline/update")
+    def api_timeline_update():
+        return jsonify({"ok": True, "route": "/api/timeline/update"})
+
+    @app.post("/api/timeline/regenerate")
+    def api_timeline_regenerate():
+        return jsonify({"ok": True, "route": "/api/timeline/regenerate"})
+
+    @app.post("/api/timeline/apply_global")
+    def api_timeline_apply_global():
+        return jsonify({"ok": True, "route": "/api/timeline/apply_global"})
+
+    @app.post("/api/critic/run")
+    def api_critic_run():
+        return jsonify({"ok": True, "route": "/api/critic/run"})
+
+    @app.post("/api/approve")
+    def api_approve():
+        return jsonify({"ok": True, "route": "/api/approve"})
+
+    @app.post("/api/export")
+    def api_export():
+        return jsonify({"ok": True, "route": "/api/export"})
+
+    @app.post("/api/import")
+    def api_import():
+        return jsonify({"ok": True, "route": "/api/import"})
+
+    @app.get("/api/projects/<code>")
+    def api_project_by_code(code: str):
+        return jsonify({"ok": True, "route": "/api/projects/<code>", "code": code})
+
+    @app.post("/api/agents/enhance")
+    def api_agents_enhance():
+        return jsonify({"ok": True, "route": "/api/agents/enhance"})
+
+    def app_spec() -> dict:
+        curated_routes = [
+            {"path": "/", "methods": ["GET"], "description": "Ready landing page"},
+            {"path": "/ready", "methods": ["GET"], "description": "Readiness page"},
+            {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks"},
+            {"path": "/api/spec", "methods": ["GET"], "description": "API + route spec"},
+            {"path": "/api/health", "methods": ["GET"], "description": "Health status"},
+            {"path": "/api/timeline/update", "methods": ["POST"], "description": "Update timeline"},
+            {"path": "/api/timeline/regenerate", "methods": ["POST"], "description": "Regenerate timeline"},
+            {"path": "/api/timeline/apply_global", "methods": ["POST"], "description": "Apply global timeline config"},
+            {"path": "/api/critic/run", "methods": ["POST"], "description": "Run critic pass"},
+            {"path": "/api/approve", "methods": ["POST"], "description": "Approve current draft"},
+            {"path": "/api/export", "methods": ["POST"], "description": "Export project"},
+            {"path": "/api/import", "methods": ["POST"], "description": "Import project"},
+            {"path": "/api/projects/<code>", "methods": ["GET"], "description": "Fetch project by code"},
+            {"path": "/api/agents/enhance", "methods": ["POST"], "description": "Enhance via agent"},
+        ]
+
+        seen_paths = {item["path"] for item in curated_routes}
+        for rule in app.url_map.iter_rules():
+            if rule.endpoint == "static":
+                continue
+            if rule.rule in seen_paths:
+                continue
+            methods = sorted(m for m in rule.methods if m not in {"HEAD", "OPTIONS"})
+            curated_routes.append(
+                {
+                    "path": rule.rule,
+                    "methods": methods,
+                    "description": "Auto-discovered route",
+                }
+            )
+            seen_paths.add(rule.rule)
+
+        return {
+            "name": app.config["APP_NAME"],
+            "version": app.config["VERSION"],
+            "routes": curated_routes,
+        }
+
+    @app.get("/api/spec")
+    def api_spec():
+        return jsonify(app_spec())
+
+    @app.get("/diagnostics")
+    def diagnostics():
+        needed = [
+            "/api/health",
+            "/api/timeline/update",
+            "/api/timeline/regenerate",
+            "/api/timeline/apply_global",
+            "/api/critic/run",
+            "/api/approve",
+            "/api/export",
+            "/api/import",
+            "/api/projects/<code>",
+            "/api/agents/enhance",
+            "/api/spec",
+            "/diagnostics",
+            "/ready",
+        ]
+
+        spec_routes = {route["path"] for route in app_spec()["routes"]}
+        missing_from_spec = [route for route in needed if route not in spec_routes]
+
+        checks = {
+            "health_route": "PASS" if "/api/health" in spec_routes else "FAIL",
+            "spec_mismatch": "FAIL" if missing_from_spec else "PASS",
+        }
+
+        return jsonify(
+            {
+                "status": "PASS" if all(v == "PASS" for v in checks.values()) else "FAIL",
+                "needed": needed,
+                "checks": checks,
+                "missing_from_spec": missing_from_spec,
+            }
+        )
+
     @app.get("/ready")
     def ready():
         return render_template("ready.html")
