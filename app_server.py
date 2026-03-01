@@ -112,6 +112,10 @@ def first_check_state(app: Flask) -> dict:
     state.setdefault("message", "")
     return state
 
+
+def is_api_request() -> bool:
+    return request.path.startswith('/api/')
+
 def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
     return any(row[1] == column for row in rows)
@@ -796,12 +800,21 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.errorhandler(404)
     def handle_not_found(_: Exception):
-        return jsonify({"error": "not_found"}), 404
+        if is_api_request():
+            return jsonify({"error": "not_found"}), 404
+        return render_template("friendly_error.html", code=404, title="Page not found", message="The page you requested does not exist."), 404
 
     @app.errorhandler(500)
-    def handle_server_error(_: Exception):
-        app.logger.exception("Unhandled server error")
-        return jsonify({"error": "internal_server_error"}), 500
+    def handle_server_error(error: Exception):
+        app.logger.exception("Unhandled server error: %s", error)
+        if is_api_request():
+            return jsonify({"error": "internal_server_error"}), 500
+        return render_template(
+            "friendly_error.html",
+            code=500,
+            title="Something went wrong",
+            message="An unexpected error occurred. Please retry or return to Ready.",
+        ), 500
 
     @app.get("/")
     def root():
@@ -1224,6 +1237,20 @@ def create_app(port: int | None = None) -> Flask:
             suggestion=suggestion,
         )
 
+    @app.get("/templates")
+    def templates_catalog():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
+            """
+        ).fetchall()
+        connection.close()
+        return render_template("templates_catalog.html", templates=[dict(r) for r in rows])
+
     @app.get("/analytics")
     def analytics():
         connection = sqlite3.connect(db_path)
@@ -1428,6 +1455,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
             {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
             {"path": "/exports", "methods": ["GET"], "description": "Exports page"},
+            {"path": "/templates", "methods": ["GET"], "description": "Session template catalog"},
             {"path": "/api/recovery/checkin", "methods": ["POST"], "description": "Persist daily recovery check-in"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
@@ -1482,6 +1510,10 @@ def create_app(port: int | None = None) -> Flask:
             "/recovery",
             "/analytics",
             "/exports",
+            "/templates",
+            "/api/recovery/checkin",
+            "/api/export/plan",
+            "/api/export/json",
             "/api/recovery/checkin",
             "/api/export/plan",
             "/api/export/json",
@@ -1524,6 +1556,16 @@ def create_app(port: int | None = None) -> Flask:
         check = first_check_state(app)
         if not check.get("ok", False):
             return render_template("first_run_error.html", error_message=check.get("message", "Unknown startup check failure")), 500
+
+        connection = sqlite3.connect(db_path)
+        counts = {
+            "templates": connection.execute("SELECT COUNT(*) FROM session_template").fetchone()[0],
+            "plans": connection.execute("SELECT COUNT(*) FROM plan").fetchone()[0],
+            "completions": connection.execute("SELECT COUNT(*) FROM session_completion").fetchone()[0],
+            "recovery": connection.execute("SELECT COUNT(*) FROM recovery_checkin").fetchone()[0],
+        }
+        connection.close()
+        return render_template("ready.html", counts=counts)
         return render_template("ready.html")
 
     return app

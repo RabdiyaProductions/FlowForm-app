@@ -312,3 +312,34 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
     assert 'flowform_backup.json' in names
     assert 'flowform_plan_export.html' in names
     assert 'flowform.db' in names
+
+
+def test_ready_shows_counts_and_links(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'ready.db'))
+    app = create_app(port=5416)
+    client = app.test_client()
+
+    response = client.get('/ready')
+    assert response.status_code == 200
+    body = response.data
+    assert b'Data snapshot' in body
+    assert b'Templates:' in body
+    assert b'Plan Wizard' in body
+    assert b'Current Plan' in body
+    assert b'Templates' in body
+    assert b'Recovery' in body
+    assert b'Analytics' in body
+    assert b'Exports' in body
+
+
+def test_friendly_html_404():
+    app = create_app(port=5417)
+    client = app.test_client()
+
+    html = client.get('/no-such-route')
+    assert html.status_code == 404
+    assert b'Page not found' in html.data
+
+    api = client.get('/api/no-such-route')
+    assert api.status_code == 404
+    assert api.get_json()['error'] == 'not_found'
