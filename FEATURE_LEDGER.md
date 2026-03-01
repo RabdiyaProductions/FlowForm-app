@@ -199,3 +199,23 @@ Behavior:
 - on provider timeout/error, gracefully falls back to rules-based coaching (no crash/hang),
 - without API key, uses rules-based suggestions from current plan + last recovery + recent completions,
 - always prepends a safety disclaimer and escalates injury/severe symptom prompts with medical-advice language.
+
+
+### 9) Personal media library + block attachments
+#### UI route: `GET /media`
+Behavior:
+- upload personal image/audio/video files,
+- edit tags and optional duration metadata,
+- delete with confirmation,
+- serves playable/previewable files from `instance/media/`.
+
+#### Storage
+- uploads are saved to `instance/media/`,
+- metadata stored in `media_item` table: `filename`, `original_name`, `media_type`, `tags`, `duration_sec`, `uploaded_at`.
+
+#### Template Builder attachment flow
+- `GET /templates/builder/<template_id>` shows template blocks and media selector per block,
+- `POST /templates/builder/<template_id>/save` links selected media to blocks (`media_item_id` in `json_blocks`).
+
+#### Session Player integration
+- `GET /session/start/<plan_day_id>` now hydrates block media and shows linked media (image/audio/video) while playing the block.

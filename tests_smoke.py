@@ -845,3 +845,55 @@ def test_backup_restore_drill_recovers_plan_completion_and_recovery(tmp_path, mo
     assert counts['plan'] >= 1
     assert counts['completion'] >= 1
     assert counts['recovery'] >= 1
+
+
+def test_media_upload_attach_to_template_and_visible_in_session_player(tmp_path, monkeypatch):
+    import io
+    import sqlite3
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'media.db'))
+    app = create_app(port=5441)
+    client = app.test_client()
+
+    upload = client.post(
+        '/media/upload',
+        data={
+            'file': (io.BytesIO(b"\x89PNG\r\n\x1a\nmedia-bytes"), 'breathwork.png'),
+            'tags': 'breathwork, calm',
+            'duration_sec': '600',
+        },
+        content_type='multipart/form-data',
+        follow_redirects=True,
+    )
+    assert upload.status_code == 200
+    assert b'breathwork.png' in upload.data
+
+    con = sqlite3.connect(app.config['DB_PATH'])
+    media_id = con.execute('SELECT id FROM media_item ORDER BY id DESC LIMIT 1').fetchone()[0]
+    template_id = con.execute('SELECT id FROM session_template ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+
+    save = client.post(
+        f'/templates/builder/{template_id}/save',
+        data={'media_item_id_0': str(media_id)},
+        follow_redirects=True,
+    )
+    assert save.status_code == 200
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    con2 = sqlite3.connect(app.config['DB_PATH'])
+    plan_day = con2.execute('SELECT id FROM plan_day WHERE template_id = ? ORDER BY id LIMIT 1', (template_id,)).fetchone()
+    con2.close()
+    assert plan_day is not None
+
+    session_page = client.get(f'/session/start/{plan_day[0]}')
+    assert session_page.status_code == 200
+    assert b'breathwork.png' in session_page.data
+    assert b'media/file/' in session_page.data

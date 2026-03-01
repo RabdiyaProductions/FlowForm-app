@@ -1,0 +1,51 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Media Library</h1>
+  <p class="muted">Upload personal videos/audio/images and attach them to template blocks.</p>
+</div>
+
+<div class="card">
+  <h2>Upload media</h2>
+  <form action="/media/upload" method="post" enctype="multipart/form-data">
+    <label>File (image/audio/video)</label>
+    <input type="file" name="file" required />
+    <label>Tags (comma-separated)</label>
+    <input type="text" name="tags" placeholder="breathwork, mobility" />
+    <label>Duration (sec, optional)</label>
+    <input type="number" min="0" name="duration_sec" placeholder="600" />
+    <button class="btn" type="submit">Upload</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Your media</h2>
+  {% for item in items %}
+  <div style="border:1px solid #26375c; border-radius:8px; padding:10px; margin-bottom:10px;">
+    <p><strong>{{ item.original_name }}</strong> <span class="muted">({{ item.media_type }})</span></p>
+    <p class="muted">uploaded: {{ item.uploaded_at }}</p>
+    {% if item.media_type == 'image' %}
+      <img src="/media/file/{{ item.filename }}" alt="{{ item.original_name }}" style="max-width:280px; border-radius:8px; border:1px solid #26375c;" />
+    {% elif item.media_type == 'video' %}
+      <video controls style="max-width:320px;"><source src="/media/file/{{ item.filename }}" /></video>
+    {% elif item.media_type == 'audio' %}
+      <audio controls><source src="/media/file/{{ item.filename }}" /></audio>
+    {% endif %}
+
+    <form action="/media/{{ item.id }}/tags" method="post" style="margin-top:8px;">
+      <label>Tags</label>
+      <input type="text" name="tags" value="{{ item.tags }}" />
+      <label>Duration (sec)</label>
+      <input type="number" min="0" name="duration_sec" value="{{ item.duration_sec or '' }}" />
+      <button class="btn" type="submit">Save metadata</button>
+    </form>
+
+    <form action="/media/{{ item.id }}/delete" method="post" onsubmit="return confirm('Delete this media item?');" style="margin-top:8px;">
+      <button class="btn" type="submit">Delete</button>
+    </form>
+  </div>
+  {% else %}
+    <p class="muted">No media uploaded yet.</p>
+  {% endfor %}
+</div>
+{% endblock %}

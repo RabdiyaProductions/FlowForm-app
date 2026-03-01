@@ -184,3 +184,15 @@ Recovery drill:
 - responses always include the disclaimer,
 - severe symptom prompts include escalation language to seek medical advice,
 - fallback rules engine provides useful guidance when API key is missing or provider fails.
+
+
+## Journey 15 — Media upload and block attachment works
+**Steps**
+1. Open `/media` and upload an image/audio/video file with tags.
+2. Open `/templates`, click **Template Builder** for a template, and attach the media to block 1.
+3. Create/refresh plan and open `/session/start/<plan_day_id>` that uses that template.
+
+**Accept if**
+- upload persists in media library with metadata/tags,
+- template block saves linked media selection,
+- session player shows linked media for the active block.

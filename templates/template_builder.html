@@ -1,0 +1,31 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Template Builder</h1>
+  <p><strong>{{ template.name }}</strong> · {{ template.discipline }} · {{ template.duration_minutes }} min</p>
+  <p class="muted">Attach media to each block for in-session playback support.</p>
+</div>
+
+<div class="card">
+  <form method="post" action="/templates/builder/{{ template.id }}/save">
+    {% for block in blocks %}
+    <div style="border:1px solid #26375c; border-radius:8px; padding:10px; margin-bottom:10px;">
+      <p><strong>Block {{ loop.index }}:</strong> {{ block.name }} ({{ block.minutes }} min)</p>
+      <label>Linked media</label>
+      <select name="media_item_id_{{ loop.index0 }}">
+        <option value="">None</option>
+        {% for item in media_items %}
+          <option value="{{ item.id }}" {% if block.media_item_id == item.id %}selected{% endif %}>
+            #{{ item.id }} · {{ item.original_name }} ({{ item.media_type }}) {% if item.tags %}· {{ item.tags }}{% endif %}
+          </option>
+        {% endfor %}
+      </select>
+      {% if block.media %}
+        <p class="muted">Current: {{ block.media.original_name }} ({{ block.media.media_type }})</p>
+      {% endif %}
+    </div>
+    {% endfor %}
+    <button class="btn" type="submit">Save media attachments</button>
+  </form>
+</div>
+{% endblock %}

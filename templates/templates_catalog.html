@@ -3,10 +3,11 @@
 <div class="card">
   <h1>Session Templates</h1>
   <p class="muted">Catalog of available templates used by plan generation and session suggestions.</p>
+  <p class="muted">Media items in your library: <strong>{{ media_count }}</strong> · <a href="/media">Open media library</a></p>
 </div>
 <div class="card">
   <table>
-    <thead><tr><th>Name</th><th>Discipline</th><th>Minutes</th><th>Level</th></tr></thead>
+    <thead><tr><th>Name</th><th>Discipline</th><th>Minutes</th><th>Level</th><th>Actions</th></tr></thead>
     <tbody>
       {% for t in templates %}
       <tr>
@@ -14,9 +15,10 @@
         <td>{{ t.discipline }}</td>
         <td>{{ t.duration_minutes }}</td>
         <td>{{ t.level }}</td>
+        <td><a class="btn" href="/templates/builder/{{ t.id }}">Template Builder</a></td>
       </tr>
       {% else %}
-      <tr><td colspan="4">No templates found.</td></tr>
+      <tr><td colspan="5">No templates found.</td></tr>
       {% endfor %}
     </tbody>
   </table>

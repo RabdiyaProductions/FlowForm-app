@@ -10,6 +10,7 @@
   <h2 id="blockTitle">Block</h2>
   <p>Block <span id="blockIndex">1</span>/{{ session.blocks|length }}</p>
   <p>Time left: <strong><span id="timeLeft">00:00</span></strong></p>
+  <div id="mediaPanel" style="margin-top:8px;"></div>
   <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
     <button class="btn" id="startBtn" type="button">Start</button>
     <button class="btn" id="pauseBtn" type="button">Pause</button>
@@ -55,6 +56,24 @@ function render() {
   document.getElementById('blockTitle').textContent = block.name;
   document.getElementById('blockIndex').textContent = String(Math.min(blockIdx + 1, blocks.length));
   document.getElementById('timeLeft').textContent = fmt(Math.max(0, secondsLeft));
+
+  const mediaPanel = document.getElementById('mediaPanel');
+  const media = block.media;
+  if (!media) {
+    mediaPanel.innerHTML = '<p class="muted">No linked media for this block.</p>';
+    return;
+  }
+
+  const mediaUrl = `/media/file/${media.filename}`;
+  if (media.media_type === 'image') {
+    mediaPanel.innerHTML = `<p><strong>Linked media:</strong> ${media.original_name}</p><img src="${mediaUrl}" alt="${media.original_name}" style="max-width:260px; border-radius:8px; border:1px solid #26375c;" />`;
+  } else if (media.media_type === 'video') {
+    mediaPanel.innerHTML = `<p><strong>Linked media:</strong> ${media.original_name}</p><video controls style="max-width:320px;"><source src="${mediaUrl}" /></video>`;
+  } else if (media.media_type === 'audio') {
+    mediaPanel.innerHTML = `<p><strong>Linked media:</strong> ${media.original_name}</p><audio controls><source src="${mediaUrl}" /></audio>`;
+  } else {
+    mediaPanel.innerHTML = `<p><strong>Linked media:</strong> <a href="${mediaUrl}">${media.original_name}</a></p>`;
+  }
 }
 
 function startTimer() {
