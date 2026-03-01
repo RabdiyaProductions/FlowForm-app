@@ -125,3 +125,134 @@ def test_diagnostics_endpoints():
     payload = api.get_json()
     assert 'status' in payload
     assert 'checks' in payload
+
+
+def test_session_start_finish_and_summary(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'session.db'))
+    app = create_app(port=5412)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    current_before = client.get('/plan/current')
+    assert current_before.status_code == 200
+    assert b'/session/start/' in current_before.data
+
+    import sqlite3
+    con = sqlite3.connect(app.config['DB_PATH'])
+    plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+
+    start = client.get(f'/session/start/{plan_day_id}')
+    assert start.status_code == 200
+    assert b'Start' in start.data
+    assert b'Finish' in start.data
+
+    finish = client.post('/api/session/finish', json={
+        'plan_day_id': plan_day_id,
+        'rpe': 8,
+        'notes': 'solid work',
+        'minutes_done': 44,
+    })
+    assert finish.status_code == 200
+    payload = finish.get_json()
+    assert payload['ok'] is True
+    completion_id = payload['completion_id']
+
+    summary = client.get(f'/session/summary/{completion_id}')
+    assert summary.status_code == 200
+    assert b'Session Summary' in summary.data
+    assert b'solid work' in summary.data
+
+    current_after = client.get('/plan/current')
+    assert current_after.status_code == 200
+    assert b'Completed' in current_after.data
+
+
+def test_recovery_checkin_persists_and_influences_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'recovery.db'))
+    app = create_app(port=5413)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    checkin = client.post('/api/recovery/checkin', json={
+        'date': '2026-03-01',
+        'sleep_hours': 4.5,
+        'stress_1_10': 9,
+        'soreness_1_10': 8,
+        'mood_1_10': 3,
+        'notes': 'rough day',
+    })
+    assert checkin.status_code == 200
+    out = checkin.get_json()
+    assert out['ok'] is True
+    assert out['readiness_label'] == 'low'
+
+    recovery = client.get('/recovery')
+    assert recovery.status_code == 200
+    assert b'Daily Recovery Check-in' in recovery.data
+    assert b'not medical advice' in recovery.data
+
+    plan = client.get('/plan/current')
+    assert plan.status_code == 200
+    assert b'Readiness:' in plan.data
+    assert b'Suggestion:' in plan.data
+
+
+def test_analytics_updates_after_completion(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'analytics.db'))
+    app = create_app(port=5414)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    import sqlite3
+    con = sqlite3.connect(app.config['DB_PATH'])
+    plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+
+    finish = client.post('/api/session/finish', json={
+        'plan_day_id': plan_day_id,
+        'rpe': 7,
+        'notes': 'complete',
+        'minutes_done': 42,
+    })
+    assert finish.status_code == 200
+
+    checkin = client.post('/api/recovery/checkin', json={
+        'date': '2026-03-01',
+        'sleep_hours': 7.5,
+        'stress_1_10': 4,
+        'soreness_1_10': 4,
+        'mood_1_10': 7,
+    })
+    assert checkin.status_code == 200
+
+    analytics = client.get('/analytics')
+    assert analytics.status_code == 200
+    body = analytics.data
+    assert b'Analytics' in body
+    assert b'Streak' in body
+    assert b'Weekly completion rate' in body
+    assert b'Average RPE' in body
+    assert b'Readiness trend' in body
+    assert b'Takeaway:' in body

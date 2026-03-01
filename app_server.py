@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import subprocess
+from datetime import date, datetime, timedelta, timezone
 from datetime import date, datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -452,6 +453,188 @@ def write_audit(connection: sqlite3.Connection, event: str, payload: dict) -> No
     )
 
 
+
+def blocks_from_json(raw: str) -> list[dict]:
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    blocks = payload.get("blocks") if isinstance(payload, dict) else None
+    if not isinstance(blocks, list):
+        return []
+
+    normalized = []
+    for idx, block in enumerate(blocks, start=1):
+        if not isinstance(block, dict):
+            continue
+        name = str(block.get("name", f"Block {idx}")).strip() or f"Block {idx}"
+        minutes = block.get("minutes", 0)
+        try:
+            minutes_int = max(0, int(minutes))
+        except (TypeError, ValueError):
+            minutes_int = 0
+        normalized.append({"name": name, "minutes": minutes_int, "seconds": minutes_int * 60})
+    return normalized
+
+def compute_readiness_score(sleep_hours: float, stress: int, soreness: int, mood: int) -> tuple[int, str]:
+    # Explainable weighted score out of 100.
+    sleep_component = max(0.0, min(1.0, sleep_hours / 8.0)) * 40.0
+    stress_component = ((11 - stress) / 10.0) * 20.0
+    soreness_component = ((11 - soreness) / 10.0) * 20.0
+    mood_component = (mood / 10.0) * 20.0
+    score = int(round(max(0.0, min(100.0, sleep_component + stress_component + soreness_component + mood_component))))
+
+    explanation = (
+        f"sleep({sleep_hours}h)->{sleep_component:.1f}/40, "
+        f"stress({stress})->{stress_component:.1f}/20, "
+        f"soreness({soreness})->{soreness_component:.1f}/20, "
+        f"mood({mood})->{mood_component:.1f}/20"
+    )
+    return score, explanation
+
+
+def readiness_label(score: int) -> str:
+    if score >= 75:
+        return "high"
+    if score >= 55:
+        return "moderate"
+    return "low"
+
+
+def suggestion_for_low_readiness(connection: sqlite3.Connection, minutes: int | None = None) -> dict | None:
+    target = int(minutes or 35)
+    row = connection.execute(
+        """
+        SELECT id, name, discipline, duration_minutes
+        FROM session_template
+        WHERE discipline IN ('mobility', 'recovery')
+        ORDER BY ABS(duration_minutes - ?), duration_minutes ASC
+        LIMIT 1
+        """,
+        (target,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"id": int(row[0]), "name": row[1], "discipline": row[2], "duration_minutes": int(row[3])}
+
+
+
+def analytics_snapshot(connection: sqlite3.Connection, user_id: int) -> dict:
+    # Distinct completion dates for streak math.
+    completion_dates = [
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT DISTINCT DATE(completed_at) AS day
+            FROM session_completion
+            ORDER BY day DESC
+            """
+        ).fetchall()
+        if row[0]
+    ]
+
+    streak = 0
+    if completion_dates:
+        today = date.today()
+        date_set = {date.fromisoformat(item) for item in completion_dates}
+        cursor = today
+        while cursor in date_set:
+            streak += 1
+            cursor -= timedelta(days=1)
+
+    # Weekly completion rate for current week of active plan.
+    plan = current_plan_record(connection, user_id)
+    weekly_completion_rate = 0
+    if plan is not None and plan["start_date"]:
+        start = date.fromisoformat(plan["start_date"])
+        elapsed = max(0, (date.today() - start).days)
+        current_week = min(int(plan["weeks"]), (elapsed // 7) + 1)
+
+        totals = connection.execute(
+            "SELECT COUNT(*) FROM plan_day WHERE plan_id = ? AND week = ?",
+            (int(plan["id"]), current_week),
+        ).fetchone()[0]
+        completed = connection.execute(
+            """
+            SELECT COUNT(DISTINCT pd.id)
+            FROM plan_day pd
+            JOIN session_completion sc ON sc.plan_day_id = pd.id
+            WHERE pd.plan_id = ? AND pd.week = ?
+            """,
+            (int(plan["id"]), current_week),
+        ).fetchone()[0]
+        if totals > 0:
+            weekly_completion_rate = int(round((completed / totals) * 100))
+
+    avg_rpe = {}
+    for days in (7, 14, 30):
+        row = connection.execute(
+            """
+            SELECT AVG(rpe)
+            FROM session_completion
+            WHERE completed_at >= datetime('now', ?)
+            """,
+            (f"-{days} days",),
+        ).fetchone()
+        avg_rpe[str(days)] = round(float(row[0]), 2) if row and row[0] is not None else None
+
+    readiness_rows = connection.execute(
+        """
+        SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10
+        FROM recovery_checkin
+        WHERE user_id = ?
+        ORDER BY date DESC
+        LIMIT 14
+        """,
+        (user_id,),
+    ).fetchall()
+
+    readiness_trend = []
+    for row in reversed(readiness_rows):
+        score, _ = compute_readiness_score(
+            float(row[1] or 0),
+            int(row[2] or 5),
+            int(row[3] or 5),
+            int(row[4] or 5),
+        )
+        readiness_trend.append({"date": row[0], "score": score})
+
+    # Card takeaways
+    streak_takeaway = "Excellent momentum — keep the chain alive today." if streak >= 3 else "Start or restart the streak with one focused session today."
+    weekly_takeaway = (
+        "On track this week — maintain your rhythm." if weekly_completion_rate >= 70
+        else "Below target this week — schedule one catch-up session."
+    )
+
+    rpe_7 = avg_rpe.get("7")
+    if rpe_7 is None:
+        rpe_takeaway = "No recent RPE data yet — finish a session to start insights."
+    elif rpe_7 >= 8:
+        rpe_takeaway = "Recent effort is high — consider extra recovery emphasis."
+    elif rpe_7 <= 5:
+        rpe_takeaway = "Recent effort is moderate/low — safe room to push when ready."
+    else:
+        rpe_takeaway = "Recent effort is balanced — keep progressive overload steady."
+
+    if readiness_trend:
+        latest = readiness_trend[-1]["score"]
+        readiness_takeaway = "Recovery trend is low — choose a lighter session suggestion today." if latest < 55 else "Recovery trend is supportive — proceed with planned intensity."
+    else:
+        readiness_takeaway = "No readiness trend yet — add daily recovery check-ins."
+
+    return {
+        "streak": streak,
+        "weekly_completion_rate": weekly_completion_rate,
+        "avg_rpe": avg_rpe,
+        "readiness_trend": readiness_trend,
+        "takeaways": {
+            "streak": streak_takeaway,
+            "weekly": weekly_takeaway,
+            "rpe": rpe_takeaway,
+            "readiness": readiness_takeaway,
+        },
+    }
+
 def create_app(port: int | None = None) -> Flask:
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
@@ -735,6 +918,90 @@ def create_app(port: int | None = None) -> Flask:
             return jsonify(payload), (200 if payload.get("ok") else 400)
         return redirect(url_for("plan_current"))
 
+    @app.get("/recovery")
+    def recovery():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
+        rows = connection.execute(
+            """
+            SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
+            FROM recovery_checkin
+            WHERE user_id = ?
+            ORDER BY date DESC
+            LIMIT 14
+            """,
+            (user_id,),
+        ).fetchall()
+        connection.close()
+
+        entries = [dict(row) for row in rows]
+        latest = entries[0] if entries else None
+        readiness = None
+        if latest is not None:
+            score, explanation = compute_readiness_score(
+                float(latest["sleep_hours"] or 0),
+                int(latest["stress_1_10"] or 5),
+                int(latest["soreness_1_10"] or 5),
+                int(latest["mood_1_10"] or 5),
+            )
+            readiness = {"score": score, "label": readiness_label(score), "explanation": explanation}
+
+        return render_template("recovery.html", entries=entries, readiness=readiness, today=date.today().isoformat())
+
+    @app.post("/api/recovery/checkin")
+    def api_recovery_checkin():
+        payload = request.get_json(silent=True) or request.form.to_dict()
+        try:
+            checkin_date = str(payload.get("date") or date.today().isoformat())
+            sleep_hours = max(0.0, min(24.0, float(payload.get("sleep_hours", 0))))
+            stress = clamp_int(int(payload.get("stress_1_10", 5)), 1, 10)
+            soreness = clamp_int(int(payload.get("soreness_1_10", 5)), 1, 10)
+            mood = clamp_int(int(payload.get("mood_1_10", 5)), 1, 10)
+            notes = str(payload.get("notes", "")).strip()
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid_payload"}), 400
+
+        score, explanation = compute_readiness_score(sleep_hours, stress, soreness, mood)
+        notes_with_readiness = (notes + "\n" if notes else "") + f"Readiness {score}/100 | {explanation}"
+        now = utc_now_iso()
+
+        connection = sqlite3.connect(db_path)
+        try:
+            user_id = get_or_create_founder_user(connection)
+            existing = connection.execute(
+                "SELECT id FROM recovery_checkin WHERE user_id = ? AND date = ?",
+                (user_id, checkin_date),
+            ).fetchone()
+            if existing:
+                connection.execute(
+                    """
+                    UPDATE recovery_checkin
+                    SET sleep_hours=?, stress_1_10=?, soreness_1_10=?, mood_1_10=?, notes=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (sleep_hours, stress, soreness, mood, notes_with_readiness, now, int(existing[0])),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO recovery_checkin (user_id, date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, checkin_date, sleep_hours, stress, soreness, mood, notes_with_readiness, now, now),
+                )
+            write_audit(connection, "recovery_checkin", {"date": checkin_date, "readiness_score": score})
+            connection.commit()
+        except sqlite3.Error as exc:
+            connection.rollback()
+            connection.close()
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        connection.close()
+
+        if request.is_json:
+            return jsonify({"ok": True, "readiness_score": score, "readiness_label": readiness_label(score)})
+        return redirect(url_for("plan_current"))
+
     @app.get("/plan/current")
     def plan_current():
         connection = sqlite3.connect(db_path)
@@ -747,6 +1014,14 @@ def create_app(port: int | None = None) -> Flask:
 
         rows = connection.execute(
             """
+            SELECT
+                pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes,
+                MAX(sc.id) AS completion_id
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            LEFT JOIN session_completion sc ON sc.plan_day_id = pd.id
+            WHERE pd.plan_id = ?
+            GROUP BY pd.id, pd.week, pd.day_index, pd.title, st.name, st.discipline, st.duration_minutes
             SELECT pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
             FROM plan_day pd
             LEFT JOIN session_template st ON st.id = pd.template_id
@@ -755,6 +1030,36 @@ def create_app(port: int | None = None) -> Flask:
             """,
             (int(plan["id"]),),
         ).fetchall()
+
+        recent = connection.execute(
+            """
+            SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
+            FROM recovery_checkin
+            WHERE user_id = ?
+            ORDER BY date DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+
+        readiness = None
+        suggestion = None
+        if recent is not None:
+            score, explanation = compute_readiness_score(
+                float(recent["sleep_hours"] or 0),
+                int(recent["stress_1_10"] or 5),
+                int(recent["soreness_1_10"] or 5),
+                int(recent["mood_1_10"] or 5),
+            )
+            readiness = {
+                "score": score,
+                "label": readiness_label(score),
+                "explanation": explanation,
+                "date": recent["date"],
+            }
+            if score < 55:
+                suggestion = suggestion_for_low_readiness(connection)
+
         connection.close()
 
         weeks_map: dict[int, list[dict]] = {}
@@ -767,6 +1072,8 @@ def create_app(port: int | None = None) -> Flask:
                     "template_name": row["template_name"],
                     "discipline": row["discipline"],
                     "duration_minutes": row["duration_minutes"],
+                    "completed": row["completion_id"] is not None,
+                    "completion_id": row["completion_id"],
                 }
             )
 
@@ -776,12 +1083,129 @@ def create_app(port: int | None = None) -> Flask:
         today_day = (elapsed % 7) + 1
 
         week_cards = [{"week": week, "days": days} for week, days in sorted(weeks_map.items())]
+        today_plan_day_id = None
+        for week in week_cards:
+            if week["week"] != today_week:
+                continue
+            for day in week["days"]:
+                if day["day_index"] == today_day:
+                    today_plan_day_id = day["id"]
+                    break
+
         return render_template(
             "plan_current.html",
             plan=plan,
             weeks=week_cards,
             today_week=today_week,
             today_day=today_day,
+            today_plan_day_id=today_plan_day_id,
+            readiness=readiness,
+            suggestion=suggestion,
+        )
+
+    @app.get("/analytics")
+    def analytics():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
+        data = analytics_snapshot(connection, user_id)
+        connection.close()
+        return render_template("analytics.html", analytics=data)
+
+    @app.get("/session/start/<int:plan_day_id>")
+    def session_start(plan_day_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT pd.id AS plan_day_id, pd.title, pd.week, pd.day_index, st.name AS template_name,
+                   st.duration_minutes, st.json_blocks
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.id = ?
+            """,
+            (plan_day_id,),
+        ).fetchone()
+        connection.close()
+
+        if row is None:
+            return jsonify({"error": "plan_day_not_found"}), 404
+
+        blocks = blocks_from_json(row["json_blocks"] or "")
+        if not blocks:
+            duration = int(row["duration_minutes"] or 30)
+            blocks = [{"name": row["template_name"] or "Session", "minutes": duration, "seconds": duration * 60}]
+
+        return render_template(
+            "session_start.html",
+            session={
+                "plan_day_id": int(row["plan_day_id"]),
+                "title": row["title"] or row["template_name"] or "Session",
+                "template_name": row["template_name"] or "Session",
+                "week": int(row["week"]),
+                "day_index": int(row["day_index"]),
+                "blocks": blocks,
+            },
+        )
+
+    @app.post("/api/session/finish")
+    def api_session_finish():
+        payload = request.get_json(silent=True) or request.form.to_dict()
+        try:
+            plan_day_id = int(payload.get("plan_day_id"))
+            rpe = clamp_int(int(payload.get("rpe", 5)), 1, 10)
+            notes = str(payload.get("notes", "")).strip()
+            minutes_done = clamp_int(int(payload.get("minutes_done", 0)), 0, 300)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid_payload"}), 400
+
+        now = utc_now_iso()
+        connection = sqlite3.connect(db_path)
+        try:
+            exists = connection.execute("SELECT id FROM plan_day WHERE id = ?", (plan_day_id,)).fetchone()
+            if not exists:
+                return jsonify({"ok": False, "error": "plan_day_not_found"}), 404
+
+            cursor = connection.execute(
+                """
+                INSERT INTO session_completion (plan_day_id, completed_at, rpe, notes, minutes_done, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (plan_day_id, now, rpe, notes, minutes_done, now, now),
+            )
+            completion_id = int(cursor.lastrowid)
+            write_audit(connection, "session_completed", {"completion_id": completion_id, "plan_day_id": plan_day_id})
+            connection.commit()
+        except sqlite3.Error as exc:
+            connection.rollback()
+            connection.close()
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        connection.close()
+
+        return jsonify({"ok": True, "completion_id": completion_id, "redirect": f"/session/summary/{completion_id}"})
+
+    @app.get("/session/summary/<int:completion_id>")
+    def session_summary(completion_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.title, pd.week, pd.day_index, st.name AS template_name
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE sc.id = ?
+            """,
+            (completion_id,),
+        ).fetchone()
+        connection.close()
+
+        if row is None:
+            return jsonify({"error": "completion_not_found"}), 404
+
+        return render_template("session_summary.html", completion=row)
+
         )
 
     @app.post("/api/timeline/update")
@@ -826,6 +1250,9 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/ready", "methods": ["GET"], "description": "Readiness page"},
             {"path": "/plan/wizard", "methods": ["GET"], "description": "Plan creation wizard"},
             {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
+            {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
+            {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
+            {"path": "/api/recovery/checkin", "methods": ["POST"], "description": "Persist daily recovery check-in"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
             {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks (HTML)"},
@@ -834,6 +1261,9 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/api/health", "methods": ["GET"], "description": "Legacy API health status"},
             {"path": "/api/plan/create", "methods": ["POST"], "description": "Create a 4-week plan"},
             {"path": "/api/plan/regenerate-next-week", "methods": ["POST"], "description": "Regenerate next week plan days"},
+            {"path": "/session/start/<plan_day_id>", "methods": ["GET"], "description": "Session player"},
+            {"path": "/api/session/finish", "methods": ["POST"], "description": "Persist session completion"},
+            {"path": "/session/summary/<completion_id>", "methods": ["GET"], "description": "Session completion summary"},
             {"path": "/api/timeline/update", "methods": ["POST"], "description": "Update timeline"},
             {"path": "/api/timeline/regenerate", "methods": ["POST"], "description": "Regenerate timeline"},
             {"path": "/api/timeline/apply_global", "methods": ["POST"], "description": "Apply global timeline config"},
@@ -870,6 +1300,9 @@ def create_app(port: int | None = None) -> Flask:
             "/api/plan/create",
             "/plan/wizard",
             "/plan/current",
+            "/recovery",
+            "/analytics",
+            "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",
             "/ready",
