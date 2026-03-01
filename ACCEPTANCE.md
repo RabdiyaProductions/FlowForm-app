@@ -1,56 +1,106 @@
-# ACCEPTANCE (True Ready Definition)
+# ACCEPTANCE
 
-This acceptance definition reflects the **current repository state**.
+## Journey 1 — Setup and boot
+**Steps**
+1. Run `_BAT/1_setup.bat`.
+2. Run `_BAT/2_run.bat`.
+3. Open `/ready`.
 
-## 1) Boot determinism
-Required flow:
-1. Run `_BAT/1_setup.bat`
-2. Run `_BAT/2_run.bat`
-3. Open `/diagnostics`
+**Accept if**
+- app boots and responds on resolved port
+- `/ready` and `/api/health` return 200
 
-Pass criteria:
-- App starts deterministically on configured/default port.
-- Startup must remain non-blocking (no startup blocking first-run gate).
-- `/diagnostics` returns `PASS`.
+## Journey 2 — Create founder plan
+**Steps**
+1. Open `/plan/wizard`.
+2. Choose goal.
+3. Set days/week (2–6).
+4. Set minutes/session (30–75).
+5. Rank disciplines 1–5.
+6. Add injury/equipment constraints.
+7. Click **Create 4-week plan**.
 
-## 2) Regression gate
-Required flow:
-- Run `python tools/run_full_tests.py` (or `_BAT/6_run_tests.bat`).
+**Accept if**
+- redirect to `/plan/current`
+- refresh `/plan/current` and plan remains visible
 
-Pass criteria:
-- Runner exits with code `0`.
-- Both smoke suites pass.
+## Journey 3 — Start and run a session
+**Steps**
+1. On `/plan/current`, click **Start today’s session**.
+2. On `/session/start/<plan_day_id>`, verify block list and timer.
+3. Use **Start / Pause / Next / Back**.
 
-## 3) Critical path (product readiness target)
-Target path:
-1. Create project
-2. Generate pilot
-3. Critic run
-4. Approve
-5. Export
+**Accept if**
+- blocks render in order
+- timer updates for timed blocks
 
-Pass criteria:
-- Each step completes with valid state transitions and artifacts.
+## Journey 4 — Finish and capture completion
+**Steps**
+1. Click **Finish** in session player.
+2. Enter RPE (1–10), notes, minutes_done.
+3. Click **Save completion**.
 
-Current snapshot note:
-- Timeline/critic/approve/import/export endpoints are present as lightweight ack-style APIs; full end-to-end stateful pipeline is not fully implemented yet.
+**Accept if**
+- `session_completion` row is written
+- redirect to `/session/summary/<completion_id>`
+- summary shows captured values
 
-## 4) Export quality
-Required for true ready:
-- Export ZIP is produced.
-- ZIP includes `manifest.json` and required payload files.
+## Journey 5 — Completion reflected in current plan
+**Steps**
+1. Open `/plan/current` after finishing.
+2. Find the session row just completed.
 
-Current snapshot note:
-- `/api/export` currently returns JSON ack; ZIP/manifest artifact quality gate is not yet implemented.
+**Accept if**
+- row displays **Completed**
+- app still exposes `/diagnostics` and `/api/diagnostics`
 
-## 5) Error handling and gating
-Required for true ready:
-- Missing required fields return clear actionable messages.
-- Approval gating is enforced.
 
-Current snapshot note:
-- Robust field-level validation/gating for the full pipeline is not fully implemented.
+## Journey 6 — Recovery check-in drives daily suggestion
+**Steps**
+1. Open `/recovery`.
+2. Fill sleep/stress/soreness/mood and submit check-in.
+3. Confirm latest check-in appears in last-14-days list.
+4. Open `/plan/current`.
 
-## 6) Explicit non-goal
-- Final MP4 rendering is **NOT required yet**.
-- Current expected engine output is specs/packs and workflow orchestration readiness.
+**Accept if**
+- check-in persists and is visible in `/recovery` history
+- readiness badge appears on `/plan/current`
+- when readiness is low, a lighter-template suggestion appears without auto-overwriting the plan
+- safety disclaimer is visible on `/recovery` (not medical advice)
+
+
+## Journey 7 — Full backup download works
+**Steps**
+1. Open `/exports`.
+2. Click **Download full backup**.
+3. Open downloaded ZIP and inspect contents.
+
+**Accept if**
+- ZIP contains `flowform.db`, `flowform_backup.json`, `settings.json`, and `manifest.json`,
+- ZIP contains `media/` files when media exists,
+- backup can be created in one click without app errors.
+
+
+## Journey 8 — Restore requires confirmation and overwrites safely
+**Steps**
+1. Open `/restore`.
+2. Select backup ZIP.
+3. Click **Preview restore summary** and verify counts/warning.
+4. Click **Confirm and restore** and accept confirmation prompt.
+
+**Accept if**
+- preview shows counts and explicit overwrite warning,
+- restore only runs after confirmation,
+- restore failure returns error with no partial apply,
+- successful restore replaces current DB/media with backup state.
+
+
+## Journey 9 — PDF exports are readable and complete
+**Steps**
+1. From `/exports`, export a plan PDF with `/api/export/plan_pdf/<plan_id>`.
+2. Export a session summary PDF with `/api/export/session_summary/<completion_id>`.
+
+**Accept if**
+- plan PDF shows 4-week schedule details,
+- session PDF shows blocks, RPE, notes, and completion details,
+- both return `application/pdf` and download successfully.

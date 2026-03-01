@@ -1,46 +1,147 @@
 # FEATURE_LEDGER
 
-## Scope and evidence
-This ledger is populated from files present in this repository snapshot.
+## Founder-critical flows (implemented)
 
-Evidence used:
-- `app_server.py` (implemented Flask routes)
-- `tools/run_full_tests.py` (regression workflow)
-- `_BAT/1_setup.bat`, `_BAT/2_run.bat`, `_BAT/3_open_browser.bat`, `_BAT/6_run_tests.bat` (boot/run/test flow)
-- `README.md`, `BASELINE.md` (operational documentation)
+### 1) Create plan flow
+#### UI: `GET /plan/wizard`
+Fields:
+- goal (`strength`, `fat_loss`, `mobility`, `stress`, `hybrid`)
+- days/week (`2`–`6`)
+- minutes/session (`30`–`75`)
+- discipline preference rank 1–5
+- injury flags, equipment, constraints
 
-Requested source files not found in this repo snapshot:
-- `app.py` (missing; implementation lives in `app_server.py`)
-- `QUICKSTART.md` (missing)
-- `COMPLETION_MATRIX.md` (missing)
+#### API: `POST /api/plan/create`
+Behavior:
+- validates/clamps inputs
+- computes discipline ordering + progressive 4-week structure
+- persists `profile`, `plan`, `plan_day`
 
-Status key:
-- ✅ implemented and testable in current code
-- 🟨 partial/stubbed
-- ⬜ not implemented in current code
+#### UI: `GET /plan/current`
+Behavior:
+- calendar-style week/day list
+- Today marker
+- completion badge when a `session_completion` exists
+- CTA **Start today’s session**
+- CTA **Regenerate next week** (preserves completed sessions)
 
-## Route/feature ledger
+Exact click steps:
+1. Open `/plan/wizard`.
+2. Fill wizard fields and click **Create 4-week plan**.
+3. App redirects to `/plan/current` and shows persisted plan.
 
-| Feature | UI entry point (page/button) | Endpoint(s) | Data store | Outputs / artifacts | Acceptance check (what I do, what must happen) | Status |
-|---|---|---|---|---|---|---|
-| API spec | API client / diagnostics tooling | `GET /api/spec` | In-memory route manifest built from Flask `app.url_map` | JSON with app/version/routes | Call `/api/spec`; must return 200 and include all implemented core routes | ✅ |
-| Diagnostics | Browser/API client to `/diagnostics` | `GET /diagnostics` | In-memory checks against API spec | JSON status/checks/missing routes | Call `/diagnostics`; must return `status=PASS` with no missing routes | ✅ |
-| App state (requested) | N/A in current UI | `/api/state` | N/A | N/A | Endpoint is requested but not present in app routes | ⬜ |
-| Orders (requested) | N/A in current UI | `/api/orders` | N/A | N/A | Endpoint is requested but not present in app routes | ⬜ |
-| Generate flow (requested) | N/A in current UI | `/api/generate/*` | N/A | N/A | Endpoint family is requested but not present in app routes | ⬜ |
-| Timeline APIs | No dedicated button in current ready UI | `POST /api/timeline/update`, `POST /api/timeline/regenerate`, `POST /api/timeline/apply_global` | No persisted write behavior currently | JSON ack payloads | POST each endpoint; must return 200 JSON ack | 🟨 |
-| Critic run | No dedicated button in current ready UI | `POST /api/critic/run` | No persisted write behavior currently | JSON ack payload | POST endpoint; must return 200 JSON ack | 🟨 |
-| Approve | No dedicated button in current ready UI | `POST /api/approve` | No persisted write behavior currently | JSON ack payload | POST endpoint; must return 200 JSON ack | 🟨 |
-| Export | No dedicated button in current ready UI | `POST /api/export`, `/exports` (requested route missing) | File artifact creation not yet implemented | Currently JSON ack only (no ZIP emitted yet) | POST `/api/export`; currently returns ack, but ZIP acceptance is not yet met | 🟨 |
-| Import | No dedicated button in current ready UI | `POST /api/import`, `/imports` (requested route missing) | File import persistence not yet implemented | Currently JSON ack only | POST `/api/import`; currently returns ack, route `/imports` is not implemented | 🟨 |
-| Project lookup helper | No dedicated button in current ready UI | `GET /api/projects/<code>` | No project DB query yet | JSON echo payload with code | GET endpoint with code; must return 200 and echo `code` | 🟨 |
-| Health + readiness | Browser to `/ready` | `GET /health`, `GET /api/health`, `GET /ready`, `GET /` | SQLite (`data/flowform.db`) with fail-safe init (non-blocking) | JSON health payload + ready page | Open `/health`; must include `status/version/time/db_ok/provider_status` | ✅ |
+---
 
-## Core workflows (from available docs/code)
-1. **Boot path**: `_BAT/1_setup.bat` → `_BAT/2_run.bat` → validate `/diagnostics`.
-2. **Regression gate**: `_BAT/6_run_tests.bat` or `python tools/run_full_tests.py`.
-3. **Startup safety note**: No first-run integrity gate blocks startup; DB init is fail-safe and non-blocking.
-4. **Automated test sequence** (from `tools/run_full_tests.py`):
-   - `python -m pytest tests_smoke.py`
-   - `python -m pytest smoke_test.py`
-   - pass only if both commands exit 0.
+### 2) Do session flow
+#### UI: `GET /session/start/<plan_day_id>`
+Behavior:
+- ordered blocks loaded from `session_template.json_blocks`
+- controls: **Start / Pause / Next / Back / Finish**
+- timer per block (countdown)
+
+#### Finish API: `POST /api/session/finish`
+Payload:
+- `plan_day_id`
+- `rpe` (1–10)
+- `notes`
+- `minutes_done`
+
+Persistence:
+- inserts `session_completion`
+- writes `audit_log` event
+- returns redirect to `/session/summary/<completion_id>`
+
+#### UI: `GET /session/summary/<completion_id>`
+Behavior:
+- shows completion fields (RPE, notes, minutes, timestamp)
+- link back to `/plan/current`
+
+Exact click steps:
+1. Open `/plan/current`.
+2. Click **Start today’s session**.
+3. In player, use Start/Pause/Next/Back as needed.
+4. Click **Finish**, enter RPE + notes + minutes.
+5. Click **Save completion**.
+6. Land on `/session/summary/<completion_id>`.
+7. Return to `/plan/current` and confirm row shows **Completed**.
+
+---
+
+## Supporting endpoints still present
+- `/health`, `/api/health`
+- `/diagnostics` (HTML), `/api/diagnostics` (JSON)
+- `/api/spec`
+- timeline/critic/import/export stubs
+
+---
+
+### 4) One-click full backup + restore
+#### Backup API: `GET /api/export/backup`
+Behavior:
+- returns ZIP containing:
+  - `flowform.db` (SQLite database),
+  - `flowform_backup.json` (full JSON snapshot),
+  - `settings.json` (runtime settings snapshot),
+  - `manifest.json` (counts summary + warning),
+  - `media/*` files from `instance/media/`.
+
+#### Restore UI: `GET /restore`
+Behavior:
+- file selector for backup ZIP,
+- **Preview restore summary** calls restore endpoint in preview mode,
+- explicit confirmation prompt before overwrite.
+
+#### Restore API: `POST /api/import/backup`
+Behavior:
+- accepts backup ZIP upload,
+- returns summary (`plans/templates/completions/recovery/media_files`) and overwrite warning,
+- requires confirmation (`confirm_overwrite=true`) before applying restore,
+- restore is staged and applied all-or-nothing; failures return error without partial apply.
+
+Exact click steps:
+1. Open `/exports`.
+2. Click **Download full backup**.
+3. Open `/restore`, select ZIP, click **Preview restore summary**.
+4. Click **Confirm and restore** and accept confirmation prompt.
+
+---
+
+### 5) Richer exports (PDF)
+#### Plan PDF: `GET /api/export/plan_pdf/<plan_id>`
+Behavior:
+- returns readable PDF with 4-week schedule details (week/day/title/discipline/minutes).
+
+#### Session summary PDF: `GET /api/export/session_summary/<completion_id>`
+Behavior:
+- returns readable PDF for completed session (blocks, RPE, notes, minutes, completion timestamp).
+
+#### Existing JSON export remains
+- `GET /api/export/json` still returns full JSON backup for programmatic use.
+
+
+---
+
+### 3) Daily recovery loop
+#### UI: `GET /recovery`
+Behavior:
+- daily check-in form (sleep/stress/soreness/mood/notes)
+- list of last 14 days
+- explicit safety disclaimer: not medical advice
+
+#### API: `POST /api/recovery/checkin`
+Behavior:
+- upserts check-in for the day
+- computes explainable readiness score from sleep/stress/soreness/mood
+- persists readiness explanation in notes and emits readiness score in API response
+
+#### Integration in `GET /plan/current`
+Behavior:
+- readiness badge shown from latest check-in
+- if readiness is low, show non-destructive lighter-template suggestion for today
+- plan is never auto-overwritten by readiness suggestion
+
+Exact click steps:
+1. Open `/recovery`.
+2. Submit daily check-in.
+3. Open `/plan/current`.
+4. Verify readiness badge and low-readiness suggestion (when applicable).
