@@ -1,9 +1,6 @@
 @echo off
 setlocal
 
-REM ------------------------------------------------------------
-REM Determine repository root and venv interpreter explicitly.
-REM ------------------------------------------------------------
 set "ROOT=%~dp0"
 set "VENV_DIR=%ROOT%.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
@@ -13,28 +10,26 @@ if not exist "%VENV_PY%" (
   exit /b 1
 )
 
-REM ------------------------------------------------------------
-REM Resolve preferred/available port and record ACTIVE_PORTS.json.
-REM ------------------------------------------------------------
 "%VENV_PY%" "%ROOT%boot_port.py" --write-active --print-port > "%TEMP%\flowform_port.txt"
 if errorlevel 1 exit /b 1
 set /p PORT=<"%TEMP%\flowform_port.txt"
 del "%TEMP%\flowform_port.txt" >nul 2>&1
 
 echo [FlowForm] Starting server on port %PORT%...
+start "FlowForm Server" cmd /k ""%VENV_PY%" "%ROOT%run_server.py" --port %PORT%"
 
-REM ------------------------------------------------------------
-REM Start Flask server in a separate process using venv python.
-REM Use run_server.py as authoritative entrypoint.
-REM ------------------------------------------------------------
-start "FlowForm Server" "%VENV_PY%" "%ROOT%run_server.py" --port %PORT%
+"%VENV_PY%" -c "import time,sys,urllib.request;url='http://127.0.0.1:%PORT%/health';end=time.time()+40;ok=False
+while time.time()<end:
 
-REM ------------------------------------------------------------
-REM Wait until the target port is reachable before opening browser.
-REM ------------------------------------------------------------
-"%VENV_PY%" "%ROOT%boot_port.py" --wait --port %PORT% --timeout 40
+  try:
+    ok=urllib.request.urlopen(url,timeout=2).status==200
+  except Exception:
+    ok=False
+  if ok: break
+  time.sleep(0.5)
+sys.exit(0 if ok else 1)"
 if errorlevel 1 (
-  echo [FlowForm] ERROR: server did not become ready on port %PORT%.
+  echo [FlowForm] ERROR: server did not pass /health on port %PORT%.
   exit /b 1
 )
 

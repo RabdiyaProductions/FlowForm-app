@@ -1696,19 +1696,22 @@ def create_app(port: int | None = None) -> Flask:
     @require_login
     def templates_catalog():
         connection = sqlite3.connect(db_path)
-        user_id = current_user_id(connection)
-        limit_clause = ""
-        if user_id > 0 and not has_paid_access(connection, user_id):
-            limit_clause = "LIMIT 3"
         connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            f"""
+        user_id = current_user_id(connection)
+
+        limit_templates = None
+        if user_id > 0 and not has_paid_access(connection, user_id):
+            limit_templates = 3
+
+        sql = """
             SELECT id, name, discipline, duration_minutes, level
             FROM session_template
             ORDER BY discipline ASC, duration_minutes ASC, id ASC
-            {limit_clause}
-            """
-        ).fetchall()
+        """
+        if limit_templates is not None:
+            sql += f"\nLIMIT {int(limit_templates)}"
+
+        rows = connection.execute(sql).fetchall()
         connection.close()
         return render_template("templates_catalog.html", templates=[dict(r) for r in rows])
 
@@ -1718,9 +1721,9 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
-        data = analytics_snapshot(connection, user_id)
+        snapshot = analytics_snapshot(connection, user_id)
         connection.close()
-        return render_template("analytics.html", analytics=data)
+        return render_template("analytics.html", analytics=snapshot)
 
     @app.get("/assistant")
     @require_login
