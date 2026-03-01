@@ -86,6 +86,299 @@ def provider_status() -> str:
     return "configured" if os.getenv("PROVIDER_API_KEY") else "not_configured"
 
 
+def table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def ensure_column(
+    connection: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition_sql: str,
+) -> None:
+    if not column_exists(connection, table, column):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition_sql}")
+
+
+def apply_schema_migrations(connection: sqlite3.Connection) -> None:
+    now = utc_now_iso()
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            email TEXT,
+            display_name TEXT
+        )
+        """
+    )
+    ensure_column(connection, "users", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "users", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS profile (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            goal TEXT,
+            days_per_week INTEGER,
+            minutes INTEGER,
+            equipment TEXT,
+            constraints TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            name TEXT NOT NULL,
+            start_date TEXT,
+            weeks INTEGER NOT NULL DEFAULT 4,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_template (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            discipline TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            level TEXT NOT NULL,
+            json_blocks TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plan_day (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            week INTEGER NOT NULL,
+            day_index INTEGER NOT NULL,
+            template_id INTEGER,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(plan_id) REFERENCES plan(id),
+            FOREIGN KEY(template_id) REFERENCES session_template(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_completion (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_day_id INTEGER NOT NULL,
+            completed_at TEXT NOT NULL,
+            rpe INTEGER,
+            notes TEXT,
+            minutes_done INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(plan_day_id) REFERENCES plan_day(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recovery_checkin (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            date TEXT NOT NULL,
+            sleep_hours REAL,
+            stress_1_10 INTEGER,
+            soreness_1_10 INTEGER,
+            mood_1_10 INTEGER,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    # Maintain compatibility with previous health checks.
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _healthcheck (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checked_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute("INSERT INTO _healthcheck(checked_at) VALUES (?)", (now,))
+
+
+def seed_templates(connection: sqlite3.Connection) -> None:
+    existing_count = connection.execute("SELECT COUNT(*) FROM session_template").fetchone()[0]
+    if existing_count > 0:
+        return
+
+    now = utc_now_iso()
+    templates = [
+        (
+            "Strength Foundation A",
+            "strength",
+            45,
+            "beginner",
+            '{"blocks":[{"name":"warmup","minutes":8},{"name":"compound_lifts","minutes":28},{"name":"cooldown","minutes":9}]}'
+        ),
+        (
+            "Strength Progression B",
+            "strength",
+            60,
+            "intermediate",
+            '{"blocks":[{"name":"warmup","minutes":10},{"name":"main_lifts","minutes":38},{"name":"accessory","minutes":8},{"name":"cooldown","minutes":4}]}'
+        ),
+        (
+            "Zone 2 Base Ride",
+            "cardio",
+            50,
+            "beginner",
+            '{"blocks":[{"name":"warmup","minutes":10},{"name":"steady_state","minutes":35},{"name":"cooldown","minutes":5}]}'
+        ),
+        (
+            "Tempo Intervals Run",
+            "cardio",
+            40,
+            "intermediate",
+            '{"blocks":[{"name":"warmup","minutes":8},{"name":"tempo_intervals","minutes":26},{"name":"cooldown","minutes":6}]}'
+        ),
+        (
+            "Mobility Restore",
+            "mobility",
+            30,
+            "all_levels",
+            '{"blocks":[{"name":"breath","minutes":5},{"name":"hips_spine","minutes":20},{"name":"reset","minutes":5}]}'
+        ),
+        (
+            "Yoga Recovery Flow",
+            "recovery",
+            35,
+            "all_levels",
+            '{"blocks":[{"name":"flow","minutes":25},{"name":"downregulate","minutes":10}]}'
+        ),
+        (
+            "HIIT Power Ladder",
+            "conditioning",
+            32,
+            "advanced",
+            '{"blocks":[{"name":"warmup","minutes":6},{"name":"ladder","minutes":20},{"name":"cooldown","minutes":6}]}'
+        ),
+        (
+            "Endurance Long Session",
+            "endurance",
+            75,
+            "intermediate",
+            '{"blocks":[{"name":"warmup","minutes":10},{"name":"steady_endurance","minutes":55},{"name":"cooldown","minutes":10}]}'
+        ),
+    ]
+
+    connection.executemany(
+        """
+        INSERT INTO session_template (
+            name, discipline, duration_minutes, level, json_blocks, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [(name, discipline, duration, level, blocks, now, now) for name, discipline, duration, level, blocks in templates],
+    )
+
+
+def ensure_single_founder_user(connection: sqlite3.Connection) -> None:
+    count = connection.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if count > 0:
+        return
+
+    now = utc_now_iso()
+    connection.execute(
+        """
+        INSERT INTO users (email, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("founder@flowform.local", "Founder", now, now),
+    )
+
+
+def db_integrity_snapshot(db_path: Path) -> dict:
+    required_tables = {
+        "users",
+        "profile",
+        "plan",
+        "plan_day",
+        "session_template",
+        "session_completion",
+        "recovery_checkin",
+        "audit_log",
+    }
+
+    try:
+        connection = sqlite3.connect(db_path)
+        existing_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        missing_tables = sorted(required_tables - existing_tables)
+        template_count = connection.execute("SELECT COUNT(*) FROM session_template").fetchone()[0]
+        connection.execute("SELECT 1")
+        connection.close()
+
+        db_ok = not missing_tables and template_count > 0
+        return {
+            "db_ok": db_ok,
+            "template_count": int(template_count),
+            "missing_tables": missing_tables,
+        }
+    except sqlite3.Error as exc:
+        return {
+            "db_ok": False,
+            "template_count": 0,
+            "missing_tables": sorted(required_tables),
+            "error": str(exc),
+        }
+
+
 def create_app(port: int | None = None) -> Flask:
     """Create and configure the Flask application."""
     load_env_file(ROOT_DIR / ".env")
@@ -105,33 +398,26 @@ def create_app(port: int | None = None) -> Flask:
         DB_PATH=str(db_path),
         BUILD_DATE=BUILD_DATE,
         GIT_HASH=git_hash(),
+        FIRST_CHECK={"ok": True, "message": ""},
     )
 
     app.logger.info("FlowForm boot config: port=%s db=%s", resolved_port, db_path)
 
-    def init_db_safely() -> None:
+    def init_db_safely() -> dict:
         try:
             connection = sqlite3.connect(db_path)
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS _healthcheck (id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL)"
-            )
-            connection.execute("INSERT INTO _healthcheck(checked_at) VALUES (?)", (utc_now_iso(),))
+            apply_schema_migrations(connection)
+            ensure_single_founder_user(connection)
+            seed_templates(connection)
             connection.commit()
             connection.close()
+            return {"ok": True, "message": "db_ready"}
         except sqlite3.Error as exc:
-            app.logger.warning("SQLite init skipped: %s", exc)
+            app.logger.warning("SQLite init degraded: %s", exc)
+            return {"ok": False, "message": f"SQLite init degraded: {exc}"}
 
-    def db_ok() -> bool:
-        try:
-            connection = sqlite3.connect(db_path)
-            connection.execute("SELECT 1")
-            connection.close()
-            return True
-        except sqlite3.Error as exc:
-            app.logger.exception("SQLite health check failed: %s", exc)
-            return False
-
-    init_db_safely()
+    first_check = init_db_safely()
+    app.config["FIRST_CHECK"] = first_check
 
     @app.errorhandler(404)
     def handle_not_found(_: Exception):
@@ -150,24 +436,27 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/health")
     def health():
-        is_db_ok = db_ok()
+        snapshot = db_integrity_snapshot(db_path)
         return jsonify(
             {
-                "status": "ok" if is_db_ok else "degraded",
+                "status": "ok" if snapshot["db_ok"] else "degraded",
                 "version": app.config["VERSION"],
                 "time": utc_now_iso(),
-                "db_ok": is_db_ok,
+                "db_ok": snapshot["db_ok"],
+                "template_count": snapshot["template_count"],
                 "provider_status": provider_status(),
             }
         )
 
     @app.get("/api/health")
     def api_health():
-        is_db_ok = db_ok() and app.config["FIRST_CHECK"]["ok"]
+        snapshot = db_integrity_snapshot(db_path)
+        is_db_ok = snapshot["db_ok"] and app.config["FIRST_CHECK"]["ok"]
         payload = {
             "status": "ok" if is_db_ok else "degraded",
             "port": app.config["PORT"],
             "db_ok": is_db_ok,
+            "template_count": snapshot["template_count"],
             "version": app.config["VERSION"],
         }
         return jsonify(payload)
@@ -288,9 +577,11 @@ def create_app(port: int | None = None) -> Flask:
         spec_routes = {route["path"] for route in app_spec()["routes"]}
         missing_from_spec = [route for route in needed if route not in spec_routes]
 
+        snapshot = db_integrity_snapshot(db_path)
         checks = {
             "health_route": "PASS" if "/health" in spec_routes else "FAIL",
             "spec_mismatch": "FAIL" if missing_from_spec else "PASS",
+            "db_integrity": "PASS" if snapshot["db_ok"] else "FAIL",
         }
 
         return jsonify(
@@ -299,6 +590,8 @@ def create_app(port: int | None = None) -> Flask:
                 "needed": needed,
                 "checks": checks,
                 "missing_from_spec": missing_from_spec,
+                "template_count": snapshot["template_count"],
+                "missing_tables": snapshot["missing_tables"],
             }
         )
 

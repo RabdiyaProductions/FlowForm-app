@@ -1,46 +1,96 @@
 # FEATURE_LEDGER
 
-## Scope and evidence
-This ledger is populated from files present in this repository snapshot.
+## Repository reality map (CCE-flat baseline)
 
-Evidence used:
-- `app_server.py` (implemented Flask routes)
-- `tools/run_full_tests.py` (regression workflow)
-- `_BAT/1_setup.bat`, `_BAT/2_run.bat`, `_BAT/3_open_browser.bat`, `_BAT/6_run_tests.bat` (boot/run/test flow)
-- `README.md`, `BASELINE.md` (operational documentation)
+### 1) Entrypoints that exist now
+- **Primary app module (minimal health app):** `app.py`
+  - Flask factory: `create_app(test_config=None)`
+  - Process entrypoint: `python app.py` (`__main__`)
+- **Primary server module (full route surface):** `app_server.py`
+  - Flask factory: `create_app(port=None)`
+  - Process entrypoint: `python app_server.py` (`main`)
+- **Thin launcher entrypoint:** `run_server.py` delegates to `app_server.main()`
+- **Port/bootstrap utility entrypoint:** `boot_port.py` (`main`) resolves/waits/writes active port files
 
-Requested source files not found in this repo snapshot:
-- `app.py` (missing; implementation lives in `app_server.py`)
-- `QUICKSTART.md` (missing)
-- `COMPLETION_MATRIX.md` (missing)
+### 2) Routes that exist now
 
-Status key:
-- ✅ implemented and testable in current code
-- 🟨 partial/stubbed
-- ⬜ not implemented in current code
+#### In `app.py`
+- `GET /api/health`
+- `GET /ready`
 
-## Route/feature ledger
+#### In `app_server.py`
+- `GET /`
+- `GET /health`
+- `GET /api/health`
+- `GET /version`
+- `POST /api/timeline/update`
+- `POST /api/timeline/regenerate`
+- `POST /api/timeline/apply_global`
+- `POST /api/critic/run`
+- `POST /api/approve`
+- `POST /api/export`
+- `POST /api/import`
+- `GET /api/projects/<code>`
+- `POST /api/agents/enhance`
+- `GET /api/spec`
+- `GET /diagnostics`
+- `GET /ready`
 
-| Feature | UI entry point (page/button) | Endpoint(s) | Data store | Outputs / artifacts | Acceptance check (what I do, what must happen) | Status |
-|---|---|---|---|---|---|---|
-| API spec | API client / diagnostics tooling | `GET /api/spec` | In-memory route manifest built from Flask `app.url_map` | JSON with app/version/routes | Call `/api/spec`; must return 200 and include all implemented core routes | ✅ |
-| Diagnostics | Browser/API client to `/diagnostics` | `GET /diagnostics` | In-memory checks against API spec | JSON status/checks/missing routes | Call `/diagnostics`; must return `status=PASS` with no missing routes | ✅ |
-| App state (requested) | N/A in current UI | `/api/state` | N/A | N/A | Endpoint is requested but not present in app routes | ⬜ |
-| Orders (requested) | N/A in current UI | `/api/orders` | N/A | N/A | Endpoint is requested but not present in app routes | ⬜ |
-| Generate flow (requested) | N/A in current UI | `/api/generate/*` | N/A | N/A | Endpoint family is requested but not present in app routes | ⬜ |
-| Timeline APIs | No dedicated button in current ready UI | `POST /api/timeline/update`, `POST /api/timeline/regenerate`, `POST /api/timeline/apply_global` | No persisted write behavior currently | JSON ack payloads | POST each endpoint; must return 200 JSON ack | 🟨 |
-| Critic run | No dedicated button in current ready UI | `POST /api/critic/run` | No persisted write behavior currently | JSON ack payload | POST endpoint; must return 200 JSON ack | 🟨 |
-| Approve | No dedicated button in current ready UI | `POST /api/approve` | No persisted write behavior currently | JSON ack payload | POST endpoint; must return 200 JSON ack | 🟨 |
-| Export | No dedicated button in current ready UI | `POST /api/export`, `/exports` (requested route missing) | File artifact creation not yet implemented | Currently JSON ack only (no ZIP emitted yet) | POST `/api/export`; currently returns ack, but ZIP acceptance is not yet met | 🟨 |
-| Import | No dedicated button in current ready UI | `POST /api/import`, `/imports` (requested route missing) | File import persistence not yet implemented | Currently JSON ack only | POST `/api/import`; currently returns ack, route `/imports` is not implemented | 🟨 |
-| Project lookup helper | No dedicated button in current ready UI | `GET /api/projects/<code>` | No project DB query yet | JSON echo payload with code | GET endpoint with code; must return 200 and echo `code` | 🟨 |
-| Health + readiness | Browser to `/ready` | `GET /health`, `GET /api/health`, `GET /ready`, `GET /` | SQLite (`data/flowform.db`) with fail-safe init (non-blocking) | JSON health payload + ready page | Open `/health`; must include `status/version/time/db_ok/provider_status` | ✅ |
+### 3) Templates/static assets in repo
+- **Flask templates directory:**
+  - `templates/base.html`
+  - `templates/dashboard.html`
+  - `templates/first_run_error.html`
+  - `templates/player.html`
+  - `templates/progress.html`
+  - `templates/ready.html`
+  - `templates/session_detail.html`
+  - `templates/session_new.html`
+  - `templates/sessions.html`
+  - `templates/settings.html`
+- **Top-level static/site pages:**
+  - `index.html`, `app.html`, `about.html`, `contact.html`, `faq.html`, `dashboard.html`, `plans.html`, `subscriptions.html`, `terms.html`, `privacy.html`, `success.html`, `cancel.html`, `classes.html`, `launch-checklist.html`, `sales-chat.html`, `sitemap.html`, `redirect.html`, `404.html`
+- **Top-level static assets:**
+  - `styles.css`, `script.js`
 
-## Core workflows (from available docs/code)
-1. **Boot path**: `_BAT/1_setup.bat` → `_BAT/2_run.bat` → validate `/diagnostics`.
-2. **Regression gate**: `_BAT/6_run_tests.bat` or `python tools/run_full_tests.py`.
-3. **Startup safety note**: No first-run integrity gate blocks startup; DB init is fail-safe and non-blocking.
-4. **Automated test sequence** (from `tools/run_full_tests.py`):
-   - `python -m pytest tests_smoke.py`
-   - `python -m pytest smoke_test.py`
-   - pass only if both commands exit 0.
+### 4) DB usage and schema (current)
+- **`app.py` DB behavior**
+  - Uses SQLite path from `DATABASE_PATH` (default `instance/flowform.db`) and creates table `app_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)`.
+  - Seeds row: `('initialized', 'true')`.
+- **`app_server.py` DB behavior**
+  - Uses SQLite path from `DB_PATH` (default `data/flowform.db`).
+  - Creates `_healthcheck(id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL)` and appends timestamp rows for startup health checks.
+
+### 5) Boot scripts and test runners
+- Root boot stack:
+  - `00_setup_all.bat` (venv + deps + active port write)
+  - `01_run_all.bat` (resolve port, launch server, wait, open browser)
+- `_BAT` compatibility stack:
+  - `_BAT/1_setup.bat` → calls `00_setup_all.bat`
+  - `_BAT/2_run.bat` → launches `run_server.py`
+  - `_BAT/3_open_browser.bat` → opens diagnostics URL
+  - `_BAT/6_run_tests.bat` → structure check + full tests
+- Python test orchestrator:
+  - `tools/run_full_tests.py` (runs structure guard + smoke suites)
+
+## Route purpose ledger (implemented surface)
+
+| Route | Purpose | Status |
+|---|---|---|
+| `GET /` | Ready landing page (or first-run error template) | Implemented |
+| `GET /ready` | Readiness page render | Implemented |
+| `GET /health` | Operational health JSON with db/provider signals | Implemented |
+| `GET /api/health` | API health JSON for automation | Implemented |
+| `GET /version` | Build metadata/version response | Implemented |
+| `GET /api/spec` | Route manifest/spec output | Implemented |
+| `GET /diagnostics` | Spec coverage + route checks | Implemented |
+| `POST /api/timeline/update` | Timeline update stub ack | Stub/ack |
+| `POST /api/timeline/regenerate` | Timeline regenerate stub ack | Stub/ack |
+| `POST /api/timeline/apply_global` | Global timeline apply stub ack | Stub/ack |
+| `POST /api/critic/run` | Critic pass stub ack | Stub/ack |
+| `POST /api/approve` | Approval stub ack | Stub/ack |
+| `POST /api/export` | Export stub ack | Stub/ack |
+| `POST /api/import` | Import stub ack | Stub/ack |
+| `GET /api/projects/<code>` | Project lookup stub echo | Stub/ack |
+| `POST /api/agents/enhance` | Agent enhance stub ack | Stub/ack |
+
