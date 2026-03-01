@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 import subprocess
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -73,9 +73,17 @@ def utc_now_iso() -> str:
 
 
 def git_hash() -> str:
+    git_dir = ROOT_DIR / ".git"
+    if not git_dir.exists():
+        return "not_a_git_repo"
     try:
         return (
-            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT_DIR), text=True)
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(ROOT_DIR),
+                text=True,
+                stderr=subprocess.DEVNULL,
+            )
             .strip()
         )
     except Exception:
@@ -85,6 +93,16 @@ def git_hash() -> str:
 def provider_status() -> str:
     return "configured" if os.getenv("PROVIDER_API_KEY") else "not_configured"
 
+
+
+def first_check_state(app: Flask) -> dict:
+    state = app.config.setdefault("FIRST_CHECK", {"ok": False, "message": "FIRST_CHECK missing"})
+    if not isinstance(state, dict):
+        state = {"ok": False, "message": "FIRST_CHECK malformed"}
+        app.config["FIRST_CHECK"] = state
+    state.setdefault("ok", False)
+    state.setdefault("message", "")
+    return state
 
 def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
     rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
@@ -483,8 +501,9 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/")
     def root():
-        if not app.config["FIRST_CHECK"]["ok"]:
-            return render_template("first_run_error.html", error_message=app.config["FIRST_CHECK"]["message"]), 500
+        check = first_check_state(app)
+        if not check.get("ok", False):
+            return render_template("first_run_error.html", error_message=check.get("message", "Unknown startup check failure")), 500
         return render_template("ready.html")
 
     @app.get("/health")
@@ -504,7 +523,7 @@ def create_app(port: int | None = None) -> Flask:
     @app.get("/api/health")
     def api_health():
         snapshot = db_integrity_snapshot(db_path)
-        is_db_ok = snapshot["db_ok"] and app.config["FIRST_CHECK"]["ok"]
+        is_db_ok = snapshot["db_ok"] and bool(first_check_state(app).get("ok", False))
         return jsonify(
             {
                 "status": "ok" if is_db_ok else "degraded",
@@ -809,7 +828,8 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
-            {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks"},
+            {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks (HTML)"},
+            {"path": "/api/diagnostics", "methods": ["GET"], "description": "Diagnostics checks (JSON)"},
             {"path": "/api/spec", "methods": ["GET"], "description": "API + route spec"},
             {"path": "/api/health", "methods": ["GET"], "description": "Legacy API health status"},
             {"path": "/api/plan/create", "methods": ["POST"], "description": "Create a 4-week plan"},
@@ -841,12 +861,12 @@ def create_app(port: int | None = None) -> Flask:
     def api_spec():
         return jsonify(app_spec())
 
-    @app.get("/diagnostics")
-    def diagnostics():
+    def diagnostics_payload() -> dict:
         needed = [
             "/health",
             "/version",
             "/api/health",
+            "/api/diagnostics",
             "/api/plan/create",
             "/plan/wizard",
             "/plan/current",
@@ -865,21 +885,29 @@ def create_app(port: int | None = None) -> Flask:
             "db_integrity": "PASS" if snapshot["db_ok"] else "FAIL",
         }
 
-        return jsonify(
-            {
-                "status": "PASS" if all(v == "PASS" for v in checks.values()) else "FAIL",
-                "needed": needed,
-                "checks": checks,
-                "missing_from_spec": missing_from_spec,
-                "template_count": snapshot["template_count"],
-                "missing_tables": snapshot["missing_tables"],
-            }
-        )
+        return {
+            "status": "PASS" if all(v == "PASS" for v in checks.values()) else "FAIL",
+            "needed": needed,
+            "checks": checks,
+            "missing_from_spec": missing_from_spec,
+            "template_count": snapshot["template_count"],
+            "missing_tables": snapshot["missing_tables"],
+        }
+
+    @app.get("/api/diagnostics")
+    def api_diagnostics():
+        return jsonify(diagnostics_payload())
+
+    @app.get("/diagnostics")
+    def diagnostics():
+        payload = diagnostics_payload()
+        return render_template("diagnostics.html", data=payload)
 
     @app.get("/ready")
     def ready():
-        if not app.config["FIRST_CHECK"]["ok"]:
-            return render_template("first_run_error.html", error_message=app.config["FIRST_CHECK"]["message"]), 500
+        check = first_check_state(app)
+        if not check.get("ok", False):
+            return render_template("first_run_error.html", error_message=check.get("message", "Unknown startup check failure")), 500
         return render_template("ready.html")
 
     return app

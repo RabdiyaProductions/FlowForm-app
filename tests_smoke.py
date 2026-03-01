@@ -110,3 +110,18 @@ def test_regenerate_next_week_preserves_completed_sessions(tmp_path, monkeypatch
 
     assert completion_count == 1
     assert plan_day_exists == 1
+
+
+def test_diagnostics_endpoints():
+    app = create_app(port=5411)
+    client = app.test_client()
+
+    html = client.get('/diagnostics')
+    assert html.status_code == 200
+    assert b'Diagnostics' in html.data
+
+    api = client.get('/api/diagnostics')
+    assert api.status_code == 200
+    payload = api.get_json()
+    assert 'status' in payload
+    assert 'checks' in payload

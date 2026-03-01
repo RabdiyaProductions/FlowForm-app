@@ -11,7 +11,11 @@ ALLOWED_TOP_LEVEL_ZIPS = {
 
 ALLOWED_RUN_SCRIPTS = {
     "00_setup_all.bat",
+    "00_setup.bat",
     "01_run_all.bat",
+    "_run.bat",
+    "_open_browser.bat",
+    "_run_tests.bat",
     "run_server.py",
     "boot_port.py",
     "_BAT/1_setup.bat",
@@ -23,8 +27,8 @@ ALLOWED_RUN_SCRIPTS = {
 }
 
 BOOT_STACK_GROUPS = {
-    "root_boot": {"00_setup_all.bat", "01_run_all.bat", "run_server.py", "boot_port.py"},
-    "legacy_bat_boot": {"_BAT/1_setup.bat", "_BAT/2_run.bat", "_BAT/3_open_browser.bat"},
+    "root_boot": {"00_setup.bat", "_run.bat", "_open_browser.bat", "_run_tests.bat", "run_server.py", "boot_port.py"},
+    "legacy_bat_wrappers": {"_BAT/1_setup.bat", "_BAT/2_run.bat", "_BAT/3_open_browser.bat", "_BAT/6_run_tests.bat"},
 }
 
 
