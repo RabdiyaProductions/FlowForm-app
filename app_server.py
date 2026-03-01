@@ -8,6 +8,8 @@ import sqlite3
 import subprocess
 import io
 import zipfile
+import tempfile
+import shutil
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -28,6 +30,17 @@ ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
 LOG_DIR = ROOT_DIR / "logs"
 DEFAULT_DB_PATH = DATA_DIR / "flowform.db"
+INSTANCE_DIR = ROOT_DIR / "instance"
+MEDIA_DIR = INSTANCE_DIR / "media"
+
+DISCIPLINES = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance"]
+GOAL_DEFAULTS = {
+    "strength": ["strength", "mobility", "recovery", "conditioning", "cardio"],
+    "fat_loss": ["conditioning", "cardio", "strength", "mobility", "recovery"],
+    "mobility": ["mobility", "recovery", "strength", "cardio", "conditioning"],
+    "stress": ["recovery", "mobility", "cardio", "strength", "conditioning"],
+    "hybrid": ["strength", "cardio", "mobility", "conditioning", "recovery"],
+}
 
 DISCIPLINES = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance"]
 GOAL_DEFAULTS = {
@@ -760,11 +773,74 @@ def render_plan_export_html(payload: dict) -> str:
 </body></html>
 """
 
+
+def _pdf_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def build_simple_pdf(lines: list[str], title: str = "FlowForm Export") -> bytes:
+    safe_lines = [title, ""] + [str(line)[:180] for line in lines]
+    y = 780
+    content_lines = ["BT", "/F1 12 Tf"]
+    for idx, line in enumerate(safe_lines):
+        if idx == 0:
+            content_lines.append(f"72 {y} Td ({_pdf_escape(line)}) Tj")
+        else:
+            content_lines.append("0 -16 Td")
+            content_lines.append(f"({_pdf_escape(line)}) Tj")
+    content_lines.append("ET")
+    content = "\n".join(content_lines).encode("latin-1", errors="replace")
+
+    objects: list[bytes] = []
+    objects.append(b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n")
+    objects.append(b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n")
+    objects.append(b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n")
+    objects.append(b"4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+    objects.append(f"5 0 obj << /Length {len(content)} >> stream\n".encode("latin-1") + content + b"\nendstream endobj\n")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(out))
+        out.extend(obj)
+    xref_pos = len(out)
+    out.extend(f"xref\n0 {len(objects) + 1}\n".encode("latin-1"))
+    out.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        out.extend(f"{off:010d} 00000 n \n".encode("latin-1"))
+    out.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref_pos}\n%%EOF\n"
+        ).encode("latin-1")
+    )
+    return bytes(out)
+
+
+def backup_manifest(connection: sqlite3.Connection) -> dict:
+    counts = {
+        "plans": connection.execute("SELECT COUNT(*) FROM plan").fetchone()[0],
+        "plan_days": connection.execute("SELECT COUNT(*) FROM plan_day").fetchone()[0],
+        "templates": connection.execute("SELECT COUNT(*) FROM session_template").fetchone()[0],
+        "completions": connection.execute("SELECT COUNT(*) FROM session_completion").fetchone()[0],
+        "recovery": connection.execute("SELECT COUNT(*) FROM recovery_checkin").fetchone()[0],
+    }
+    media_count = 0
+    if MEDIA_DIR.exists():
+        media_count = sum(1 for p in MEDIA_DIR.iterdir() if p.is_file())
+    return {
+        "created_at": utc_now_iso(),
+        "counts": counts,
+        "media_files": media_count,
+        "warning": "Restoring this backup overwrites current database and media files.",
+    }
+
 def create_app(port: int | None = None) -> Flask:
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     app = Flask(__name__)
 
     resolved_port = int(port if port is not None else os.getenv("PORT", "5203"))
@@ -1380,6 +1456,10 @@ def create_app(port: int | None = None) -> Flask:
     def exports_page():
         return render_template("exports.html")
 
+    @app.get("/restore")
+    def restore_page():
+        return render_template("restore.html")
+
     @app.get("/api/export/plan")
     def api_export_plan():
         connection = sqlite3.connect(db_path)
@@ -1430,6 +1510,187 @@ def create_app(port: int | None = None) -> Flask:
             download_name="flowform_export_bundle.zip",
         )
 
+    @app.get("/api/export/backup")
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        manifest = backup_manifest(connection)
+        connection.close()
+
+        settings_payload = {
+            "app_name": app.config.get("APP_NAME"),
+            "version": app.config.get("VERSION"),
+            "port": app.config.get("PORT"),
+            "build_date": app.config.get("BUILD_DATE"),
+        }
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if Path(app.config["DB_PATH"]).exists():
+                zf.write(app.config["DB_PATH"], arcname="flowform.db")
+            zf.writestr("flowform_backup.json", json.dumps(payload, indent=2))
+            zf.writestr("settings.json", json.dumps(settings_payload, indent=2))
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+            if MEDIA_DIR.exists():
+                for item in MEDIA_DIR.iterdir():
+                    if item.is_file():
+                        zf.write(item, arcname=f"media/{item.name}")
+        memory.seek(0)
+        return send_file(memory, mimetype="application/zip", as_attachment=True, download_name="flowform_full_backup.zip")
+
+    @app.get("/api/export/plan_pdf/<int:plan_id>")
+    def api_export_plan_pdf(plan_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        plan = connection.execute("SELECT id, name, start_date, weeks, status FROM plan WHERE id = ?", (plan_id,)).fetchone()
+        if plan is None:
+            connection.close()
+            return jsonify({"error": "plan_not_found"}), 404
+        days = connection.execute(
+            """
+            SELECT pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
+            ORDER BY pd.week ASC, pd.day_index ASC
+            """,
+            (plan_id,),
+        ).fetchall()
+        connection.close()
+
+        lines = [
+            f"Plan: {plan['name']} (status: {plan['status']})",
+            f"Start: {plan['start_date']} | Weeks: {plan['weeks']}",
+            "",
+            "4-week schedule:",
+        ]
+        for row in days:
+            lines.append(
+                f"W{row['week']} D{row['day_index']} | {row['title'] or row['template_name'] or 'Session'} | {row['discipline'] or '-'} | {row['duration_minutes'] or 0} min"
+            )
+        pdf = build_simple_pdf(lines, title="FlowForm Plan PDF Export")
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_plan_{plan_id}.pdf")
+
+    @app.get("/api/export/session_summary/<int:completion_id>")
+    def api_export_session_summary_pdf(completion_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.title, pd.week, pd.day_index, st.name AS template_name, st.json_blocks
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE sc.id = ?
+            """,
+            (completion_id,),
+        ).fetchone()
+        connection.close()
+        if row is None:
+            return jsonify({"error": "completion_not_found"}), 404
+
+        blocks = blocks_from_json(row["json_blocks"] or "")
+        lines = [
+            f"Session title: {row['title'] or row['template_name'] or 'Session'}",
+            f"Completed at: {row['completed_at']}",
+            f"Week/Day: W{row['week']} D{row['day_index']}",
+            f"RPE: {row['rpe']} | Minutes: {row['minutes_done']}",
+            f"Notes: {row['notes'] or ''}",
+            "",
+            "Blocks:",
+        ]
+        for block in blocks:
+            lines.append(f"- {block.get('name', 'Block')} ({block.get('minutes', 0)} min)")
+        pdf = build_simple_pdf(lines, title="FlowForm Session Summary PDF")
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_session_{completion_id}.pdf")
+
+    @app.post("/api/import/backup")
+    def api_import_backup():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"ok": False, "error": "file_required"}), 400
+
+        should_confirm = str((request.form.get("confirm_overwrite") or "false")).lower() in {"true", "1", "yes"}
+        raw = upload.read()
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile:
+            return jsonify({"ok": False, "error": "invalid_zip"}), 400
+
+        names = set(zf.namelist())
+        if "flowform.db" not in names:
+            return jsonify({"ok": False, "error": "flowform.db_missing"}), 400
+
+        manifest = {}
+        if "manifest.json" in names:
+            try:
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+            except Exception:
+                manifest = {}
+
+        summary = {
+            "plans": int((manifest.get("counts") or {}).get("plans", 0)),
+            "templates": int((manifest.get("counts") or {}).get("templates", 0)),
+            "completions": int((manifest.get("counts") or {}).get("completions", 0)),
+            "recovery": int((manifest.get("counts") or {}).get("recovery", 0)),
+            "media_files": int(manifest.get("media_files", 0)),
+            "warning": "Restoring this backup will overwrite current data.",
+        }
+
+        if not should_confirm:
+            return jsonify({"ok": True, "requires_confirmation": True, "summary": summary})
+
+        db_target = Path(app.config["DB_PATH"])
+        db_target.parent.mkdir(parents=True, exist_ok=True)
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="flowform-restore-"))
+        stage_db = temp_dir / "flowform.db"
+        stage_media = temp_dir / "media"
+        stage_media.mkdir(exist_ok=True)
+
+        try:
+            stage_db.write_bytes(zf.read("flowform.db"))
+            for name in names:
+                if name.startswith("media/") and not name.endswith("/"):
+                    out = stage_media / Path(name).name
+                    out.write_bytes(zf.read(name))
+
+            probe = sqlite3.connect(stage_db)
+            required = {"plan", "plan_day", "session_template", "session_completion", "recovery_checkin"}
+            existing = {r[0] for r in probe.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            probe.close()
+            if not required.issubset(existing):
+                raise ValueError("backup_database_schema_invalid")
+
+            old_db = db_target.with_suffix(".pre_restore.bak")
+            if db_target.exists():
+                shutil.copy2(db_target, old_db)
+
+            tmp_live_db = db_target.with_suffix(".restore_tmp")
+            shutil.copy2(stage_db, tmp_live_db)
+            tmp_live_db.replace(db_target)
+
+            old_media = MEDIA_DIR.parent / "media_pre_restore"
+            if old_media.exists():
+                shutil.rmtree(old_media)
+            if MEDIA_DIR.exists():
+                MEDIA_DIR.replace(old_media)
+            shutil.copytree(stage_media, MEDIA_DIR, dirs_exist_ok=True)
+            if old_media.exists():
+                shutil.rmtree(old_media)
+            if old_db.exists():
+                old_db.unlink(missing_ok=True)
+
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({"ok": True, "restored": summary})
+
     @app.post("/api/export")
     def api_export():
         return jsonify({"ok": True, "route": "/api/export"})
@@ -1455,6 +1716,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
             {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
             {"path": "/exports", "methods": ["GET"], "description": "Exports page"},
+            {"path": "/restore", "methods": ["GET"], "description": "Backup restore page"},
             {"path": "/templates", "methods": ["GET"], "description": "Session template catalog"},
             {"path": "/api/recovery/checkin", "methods": ["POST"], "description": "Persist daily recovery check-in"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
@@ -1477,7 +1739,11 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/api/export/plan", "methods": ["GET"], "description": "Download plan HTML export"},
             {"path": "/api/export/json", "methods": ["GET"], "description": "Download full backup JSON"},
             {"path": "/api/export/zip", "methods": ["GET"], "description": "Download zip bundle"},
+            {"path": "/api/export/backup", "methods": ["GET"], "description": "Download full-fidelity backup ZIP"},
+            {"path": "/api/export/plan_pdf/<plan_id>", "methods": ["GET"], "description": "Download plan PDF"},
+            {"path": "/api/export/session_summary/<completion_id>", "methods": ["GET"], "description": "Download session summary PDF"},
             {"path": "/api/import", "methods": ["POST"], "description": "Import project"},
+            {"path": "/api/import/backup", "methods": ["POST"], "description": "Restore full-fidelity backup ZIP"},
             {"path": "/api/projects/<code>", "methods": ["GET"], "description": "Fetch project by code"},
             {"path": "/api/agents/enhance", "methods": ["POST"], "description": "Enhance via agent"},
         ]
@@ -1510,10 +1776,15 @@ def create_app(port: int | None = None) -> Flask:
             "/recovery",
             "/analytics",
             "/exports",
+            "/restore",
             "/templates",
             "/api/recovery/checkin",
             "/api/export/plan",
             "/api/export/json",
+            "/api/export/backup",
+            "/api/export/plan_pdf/<plan_id>",
+            "/api/export/session_summary/<completion_id>",
+            "/api/import/backup",
             "/api/recovery/checkin",
             "/api/export/plan",
             "/api/export/json",

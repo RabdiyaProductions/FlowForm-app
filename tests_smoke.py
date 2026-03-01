@@ -314,6 +314,119 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
     assert 'flowform.db' in names
 
 
+def test_full_backup_endpoint_contains_manifest_and_settings(tmp_path, monkeypatch):
+    import io
+    import json as _json
+    import zipfile
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'full-backup.db'))
+    app = create_app(port=5423)
+    client = app.test_client()
+
+    backup = client.get('/api/export/backup')
+    assert backup.status_code == 200
+    assert backup.headers['Content-Type'].startswith('application/zip')
+
+    zf = zipfile.ZipFile(io.BytesIO(backup.data))
+    names = set(zf.namelist())
+    assert 'flowform.db' in names
+    assert 'flowform_backup.json' in names
+    assert 'settings.json' in names
+    assert 'manifest.json' in names
+
+    manifest = _json.loads(zf.read('manifest.json').decode('utf-8'))
+    assert 'counts' in manifest
+    assert 'warning' in manifest
+
+
+def test_restore_backup_preview_and_apply(tmp_path, monkeypatch):
+    import io
+    import sqlite3
+
+    source_db = tmp_path / 'source.db'
+    monkeypatch.setenv('DB_PATH', str(source_db))
+    app = create_app(port=5424)
+    client = app.test_client()
+
+    client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    backup_zip = client.get('/api/export/backup').data
+
+    target_db = tmp_path / 'target.db'
+    monkeypatch.setenv('DB_PATH', str(target_db))
+    app2 = create_app(port=5425)
+    client2 = app2.test_client()
+
+    preview = client2.post(
+        '/api/import/backup',
+        data={'file': (io.BytesIO(backup_zip), 'backup.zip')},
+        content_type='multipart/form-data',
+    )
+    assert preview.status_code == 200
+    preview_payload = preview.get_json()
+    assert preview_payload['requires_confirmation'] is True
+    assert 'warning' in preview_payload['summary']
+
+    restore = client2.post(
+        '/api/import/backup',
+        data={
+            'file': (io.BytesIO(backup_zip), 'backup.zip'),
+            'confirm_overwrite': 'true',
+        },
+        content_type='multipart/form-data',
+    )
+    assert restore.status_code == 200
+    assert restore.get_json()['ok'] is True
+
+    con = sqlite3.connect(app2.config['DB_PATH'])
+    plans = con.execute('SELECT COUNT(*) FROM plan').fetchone()[0]
+    con.close()
+    assert plans >= 1
+
+
+def test_pdf_exports_for_plan_and_session(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'pdf.db'))
+    app = create_app(port=5426)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+    plan_id = create.get_json()['plan_id']
+
+    con = sqlite3.connect(app.config['DB_PATH'])
+    plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+
+    finish = client.post('/api/session/finish', json={
+        'plan_day_id': plan_day_id,
+        'rpe': 7,
+        'notes': 'pdf test',
+        'minutes_done': 42,
+    })
+    completion_id = finish.get_json()['completion_id']
+
+    plan_pdf = client.get(f'/api/export/plan_pdf/{plan_id}')
+    assert plan_pdf.status_code == 200
+    assert plan_pdf.headers['Content-Type'].startswith('application/pdf')
+    assert plan_pdf.data.startswith(b'%PDF')
+
+    session_pdf = client.get(f'/api/export/session_summary/{completion_id}')
+    assert session_pdf.status_code == 200
+    assert session_pdf.headers['Content-Type'].startswith('application/pdf')
+    assert session_pdf.data.startswith(b'%PDF')
+
+
 def test_ready_shows_counts_and_links(tmp_path, monkeypatch):
     monkeypatch.setenv('DB_PATH', str(tmp_path / 'ready.db'))
     app = create_app(port=5416)

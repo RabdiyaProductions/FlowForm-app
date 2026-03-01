@@ -67,6 +67,43 @@
 - readiness badge appears on `/plan/current`
 - when readiness is low, a lighter-template suggestion appears without auto-overwriting the plan
 - safety disclaimer is visible on `/recovery` (not medical advice)
+
+
+## Journey 7 — Full backup download works
+**Steps**
+1. Open `/exports`.
+2. Click **Download full backup**.
+3. Open downloaded ZIP and inspect contents.
+
+**Accept if**
+- ZIP contains `flowform.db`, `flowform_backup.json`, `settings.json`, and `manifest.json`,
+- ZIP contains `media/` files when media exists,
+- backup can be created in one click without app errors.
+
+
+## Journey 8 — Restore requires confirmation and overwrites safely
+**Steps**
+1. Open `/restore`.
+2. Select backup ZIP.
+3. Click **Preview restore summary** and verify counts/warning.
+4. Click **Confirm and restore** and accept confirmation prompt.
+
+**Accept if**
+- preview shows counts and explicit overwrite warning,
+- restore only runs after confirmation,
+- restore failure returns error with no partial apply,
+- successful restore replaces current DB/media with backup state.
+
+
+## Journey 9 — PDF exports are readable and complete
+**Steps**
+1. From `/exports`, export a plan PDF with `/api/export/plan_pdf/<plan_id>`.
+2. Export a session summary PDF with `/api/export/session_summary/<completion_id>`.
+
+**Accept if**
+- plan PDF shows 4-week schedule details,
+- session PDF shows blocks, RPE, notes, and completion details,
+- both return `application/pdf` and download successfully.
 This file defines the **top 5 founder journeys** against what is currently implemented.
 
 ## Journey 1 — First setup to first ready screen

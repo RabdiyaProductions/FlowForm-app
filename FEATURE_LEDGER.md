@@ -73,6 +73,51 @@ Exact click steps:
 - `/api/spec`
 - timeline/critic/import/export stubs
 
+---
+
+### 4) One-click full backup + restore
+#### Backup API: `GET /api/export/backup`
+Behavior:
+- returns ZIP containing:
+  - `flowform.db` (SQLite database),
+  - `flowform_backup.json` (full JSON snapshot),
+  - `settings.json` (runtime settings snapshot),
+  - `manifest.json` (counts summary + warning),
+  - `media/*` files from `instance/media/`.
+
+#### Restore UI: `GET /restore`
+Behavior:
+- file selector for backup ZIP,
+- **Preview restore summary** calls restore endpoint in preview mode,
+- explicit confirmation prompt before overwrite.
+
+#### Restore API: `POST /api/import/backup`
+Behavior:
+- accepts backup ZIP upload,
+- returns summary (`plans/templates/completions/recovery/media_files`) and overwrite warning,
+- requires confirmation (`confirm_overwrite=true`) before applying restore,
+- restore is staged and applied all-or-nothing; failures return error without partial apply.
+
+Exact click steps:
+1. Open `/exports`.
+2. Click **Download full backup**.
+3. Open `/restore`, select ZIP, click **Preview restore summary**.
+4. Click **Confirm and restore** and accept confirmation prompt.
+
+---
+
+### 5) Richer exports (PDF)
+#### Plan PDF: `GET /api/export/plan_pdf/<plan_id>`
+Behavior:
+- returns readable PDF with 4-week schedule details (week/day/title/discipline/minutes).
+
+#### Session summary PDF: `GET /api/export/session_summary/<completion_id>`
+Behavior:
+- returns readable PDF for completed session (blocks, RPE, notes, minutes, completion timestamp).
+
+#### Existing JSON export remains
+- `GET /api/export/json` still returns full JSON backup for programmatic use.
+
 
 ---
 
