@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -25,7 +26,7 @@ def wait_for_http(url: str, timeout_seconds: float = 20.0) -> bool:
     return False
 
 
-def test_smoke_server_health() -> None:
+def test_smoke_server_boot_and_health() -> None:
     repo_root = Path(__file__).resolve().parent
     port = find_free_port()
 
@@ -37,13 +38,16 @@ def test_smoke_server_health() -> None:
     )
 
     try:
-        health_url = f"http://127.0.0.1:{port}/api/health"
+        health_url = f"http://127.0.0.1:{port}/health"
         assert wait_for_http(health_url), "Server did not become healthy in time"
         with urlopen(health_url, timeout=3) as response:
-            body = response.read().decode("utf-8")
+            payload = json.loads(response.read().decode("utf-8"))
             assert response.status == 200
-            assert '"status"' in body
-            assert '"port"' in body
+            assert payload["status"] in {"ok", "degraded"}
+            assert "version" in payload
+            assert "time" in payload
+            assert isinstance(payload["db_ok"], bool)
+            assert payload["provider_status"] in {"configured", "not_configured"}
     finally:
         process.terminate()
         try:
