@@ -3,6 +3,7 @@
 <div class="card">
   <h1>Diagnostics</h1>
   <p class="muted">Friendly diagnostics view. JSON is available at <code>/api/diagnostics</code>.</p>
+  <p class="muted">Human-readable diagnostics summary. JSON is available at <code>/api/diagnostics</code>.</p>
   <p>Status: <strong>{{ data.status }}</strong></p>
   <p>Template count: <strong>{{ data.template_count }}</strong></p>
 </div>
@@ -17,6 +18,7 @@
         <td>{{ key }}</td>
         <td><strong>{{ value }}</strong></td>
       </tr>
+      <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -33,5 +35,8 @@
 
 <div class="card">
   <a class="btn" href="/ready">Back to Ready</a>
+</div>
+    <p>None</p>
+  {% endif %}
 </div>
 {% endblock %}
