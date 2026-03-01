@@ -1,0 +1,75 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Assistant Coach</h1>
+  <p class="muted">{{ disclaimer }}</p>
+</div>
+
+<div class="card">
+  <div style="display:flex;gap:8px;flex-wrap:wrap; margin-bottom:10px;">
+    <button class="btn preset" data-action="plan_tweak" data-text="Tweak my plan for this week">Plan tweak</button>
+    <button class="btn preset" data-action="substitution" data-text="Suggest a substitution for today's session">Substitution</button>
+    <button class="btn preset" data-action="recovery" data-text="Give me recovery advice for today">Recovery advice</button>
+    <button class="btn preset" data-action="motivation" data-text="Motivate me to train today">Motivation</button>
+  </div>
+
+  <textarea id="message" rows="4" placeholder="Ask your coach..."></textarea>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <button class="btn" id="sendBtn" type="button">Send</button>
+    <span id="status" class="muted"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Response</h2>
+  <pre id="response" style="white-space:pre-wrap; background:#0d1628; padding:10px; border-radius:8px; min-height:80px;"></pre>
+</div>
+
+<div class="card">
+  <h2>Recent chat history (last 20)</h2>
+  {% for item in messages %}
+  <div style="border:1px solid #26375c; border-radius:8px; padding:8px; margin-bottom:8px;">
+    <p class="muted">{{ item.created_at }} · {{ item.mode }}</p>
+    <p><strong>You:</strong> {{ item.prompt }}</p>
+    <p><strong>Coach:</strong> {{ item.response }}</p>
+  </div>
+  {% else %}
+  <p class="muted">No messages yet.</p>
+  {% endfor %}
+</div>
+
+<script>
+let selectedAction = 'custom';
+for (const btn of document.querySelectorAll('.preset')) {
+  btn.addEventListener('click', () => {
+    selectedAction = btn.dataset.action;
+    document.getElementById('message').value = btn.dataset.text;
+  });
+}
+
+document.getElementById('sendBtn').addEventListener('click', async () => {
+  const message = document.getElementById('message').value.trim();
+  if (!message && selectedAction === 'custom') return;
+  const status = document.getElementById('status');
+  status.textContent = 'Thinking...';
+  try {
+    const res = await fetch('/api/assistant/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message, action: selectedAction}),
+    });
+    const out = await res.json();
+    if (!res.ok) {
+      status.textContent = out.error || 'Error';
+      return;
+    }
+    document.getElementById('response').textContent = out.response || '';
+    status.textContent = `Done (${out.mode})`;
+    selectedAction = 'custom';
+    setTimeout(() => window.location.reload(), 300);
+  } catch (_e) {
+    status.textContent = 'Request failed';
+  }
+});
+</script>
+{% endblock %}
