@@ -13,6 +13,12 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from flask import Flask, jsonify, make_response, redirect, render_template, request, send_file, url_for
+from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 APP_NAME = "FlowForm Vitality Master Suite"
 APP_VERSION = "0.1.3"
@@ -1137,6 +1143,10 @@ def create_app(port: int | None = None) -> Flask:
             LEFT JOIN session_completion sc ON sc.plan_day_id = pd.id
             WHERE pd.plan_id = ?
             GROUP BY pd.id, pd.week, pd.day_index, pd.title, st.name, st.discipline, st.duration_minutes
+            SELECT pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
             ORDER BY pd.week ASC, pd.day_index ASC
             """,
             (int(plan["id"]),),
@@ -1317,6 +1327,8 @@ def create_app(port: int | None = None) -> Flask:
 
         return render_template("session_summary.html", completion=row)
 
+        )
+
     @app.post("/api/timeline/update")
     def api_timeline_update():
         return jsonify({"ok": True, "route": "/api/timeline/update"})
@@ -1473,6 +1485,7 @@ def create_app(port: int | None = None) -> Flask:
             "/api/recovery/checkin",
             "/api/export/plan",
             "/api/export/json",
+            "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",
             "/ready",
