@@ -9,6 +9,7 @@ from pathlib import Path
 
 APP_ID = "FlowForm-app"
 PORT_RANGE = range(5400, 5500)
+DEFAULT_PORT = 5404
 ROOT_DIR = Path(__file__).resolve().parent
 PORTS_FILE = ROOT_DIR / "PORTS.json"
 ACTIVE_PORTS_FILE = ROOT_DIR / "ACTIVE_PORTS.json"
@@ -43,7 +44,10 @@ def parse_preferred_port() -> int | None:
 
 def resolve_port() -> int:
     preferred = parse_preferred_port()
-    if preferred is not None and is_port_free(preferred):
+    if preferred is None:
+        preferred = DEFAULT_PORT
+
+    if is_port_free(preferred):
         return preferred
 
     for port in PORT_RANGE:

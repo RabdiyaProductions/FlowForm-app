@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Exports</h1>
+  <p class="muted">Portable downloads for plan + history.</p>
+  <p><strong>Safety disclaimer:</strong> Exported guidance is informational and not medical advice.</p>
+</div>
+
+<div class="card">
+  <h2>Downloads</h2>
+  <div style="display:flex; gap:10px; flex-wrap:wrap;">
+    <a class="btn" href="/api/export/plan">Download Plan HTML</a>
+    <a class="btn" href="/api/export/json">Download Full Backup JSON</a>
+    <a class="btn" href="/api/export/zip">Download ZIP Bundle</a>
+  </div>
+  <ul>
+    <li><strong>Plan HTML:</strong> printable plan + completion status.</li>
+    <li><strong>Backup JSON:</strong> includes plan, templates, completions, recovery.</li>
+    <li><strong>ZIP Bundle:</strong> DB + JSON + plan HTML.</li>
+  </ul>
+</div>
+{% endblock %}
