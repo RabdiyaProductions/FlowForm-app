@@ -1,56 +1,77 @@
-# ACCEPTANCE (True Ready Definition)
+# ACCEPTANCE
 
-This acceptance definition reflects the **current repository state**.
+This file defines the **top 5 founder journeys** against what is currently implemented.
 
-## 1) Boot determinism
-Required flow:
-1. Run `_BAT/1_setup.bat`
-2. Run `_BAT/2_run.bat`
-3. Open `/diagnostics`
+## Journey 1 — First setup to first ready screen
+**Goal:** Fresh machine can install and boot deterministically.
 
-Pass criteria:
-- App starts deterministically on configured/default port.
-- Startup must remain non-blocking (no startup blocking first-run gate).
-- `/diagnostics` returns `PASS`.
+**Steps**
+1. Run `00_setup_all.bat` (or `_BAT/1_setup.bat`).
+2. Run `01_run_all.bat` (or `_BAT/2_run.bat`).
+3. Open `/ready`.
 
-## 2) Regression gate
-Required flow:
-- Run `python tools/run_full_tests.py` (or `_BAT/6_run_tests.bat`).
+**Accept if**
+- venv and dependencies install successfully.
+- server starts on resolved port.
+- `/ready` returns HTTP 200 and renders the ready template.
 
-Pass criteria:
-- Runner exits with code `0`.
-- Both smoke suites pass.
+## Journey 2 — Founder checks operational health
+**Goal:** Confirm app health before demos.
 
-## 3) Critical path (product readiness target)
-Target path:
-1. Create project
-2. Generate pilot
-3. Critic run
-4. Approve
-5. Export
+**Steps**
+1. Visit `/health`.
+2. Visit `/api/health`.
+3. Visit `/diagnostics`.
 
-Pass criteria:
-- Each step completes with valid state transitions and artifacts.
+**Accept if**
+- `/health` includes `status`, `version`, `time`, `db_ok`, `provider_status`.
+- `/api/health` returns status + db state.
+- `/diagnostics` returns `PASS` and no missing required routes.
 
-Current snapshot note:
-- Timeline/critic/approve/import/export endpoints are present as lightweight ack-style APIs; full end-to-end stateful pipeline is not fully implemented yet.
+## Journey 3 — Founder validates product contract
+**Goal:** Verify route surface matches expected CCE-flat API contract.
 
-## 4) Export quality
-Required for true ready:
-- Export ZIP is produced.
-- ZIP includes `manifest.json` and required payload files.
+**Steps**
+1. Call `/api/spec`.
+2. Review route list and method signatures.
 
-Current snapshot note:
-- `/api/export` currently returns JSON ack; ZIP/manifest artifact quality gate is not yet implemented.
+**Accept if**
+- Spec endpoint returns HTTP 200.
+- Core product routes are present (`timeline`, `critic`, `approve`, `import/export`, `projects`, `agents`).
 
-## 5) Error handling and gating
-Required for true ready:
-- Missing required fields return clear actionable messages.
-- Approval gating is enforced.
+## Journey 4 — Founder smoke-tests orchestration endpoints
+**Goal:** Ensure command endpoints are callable even before full business logic is added.
 
-Current snapshot note:
-- Robust field-level validation/gating for the full pipeline is not fully implemented.
+**Steps**
+1. POST each of:
+   - `/api/timeline/update`
+   - `/api/timeline/regenerate`
+   - `/api/timeline/apply_global`
+   - `/api/critic/run`
+   - `/api/approve`
+   - `/api/export`
+   - `/api/import`
+   - `/api/agents/enhance`
+2. GET `/api/projects/<code>` with a sample code.
 
-## 6) Explicit non-goal
-- Final MP4 rendering is **NOT required yet**.
-- Current expected engine output is specs/packs and workflow orchestration readiness.
+**Accept if**
+- Endpoints return 200 with JSON acknowledgment payloads.
+- Project endpoint returns provided `<code>` in response.
+
+## Journey 5 — Founder runs repo guard + smoke suite
+**Goal:** Keep repo CCE-flat and prevent structural drift.
+
+**Steps**
+1. Run `_BAT/6_run_tests.bat`.
+2. (Equivalent) run `python tools/run_full_tests.py`.
+
+**Accept if**
+- `tools/check_structure.py` passes.
+- smoke tests pass.
+- run exits 0.
+
+---
+
+## Current non-goals (still true)
+- No committed MP4/render pipeline requirement.
+- Timeline/critic/import/export flows are currently stub acknowledgments, not full stateful workflow execution.
