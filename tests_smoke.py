@@ -295,6 +295,7 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
     })
 
     import sqlite3, json as _json, zipfile, io, hashlib
+    import sqlite3, json as _json, zipfile, io
     con = sqlite3.connect(app.config['DB_PATH'])
     plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
     con.close()
@@ -364,6 +365,13 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
             raw = zf.read(item)
             assert row['bytes'] == len(raw)
             assert row['sha256'] == hashlib.sha256(raw).hexdigest()
+    bundle = client.get('/api/export/zip')
+    assert bundle.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(bundle.data))
+    names = set(zf.namelist())
+    assert 'flowform_backup.json' in names
+    assert 'flowform_plan_export.html' in names
+    assert 'flowform.db' in names
 
 
 def test_full_backup_endpoint_contains_manifest_and_settings(tmp_path, monkeypatch):

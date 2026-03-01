@@ -1091,6 +1091,7 @@ def create_app(port: int | None = None) -> Flask:
         GIT_HASH=git_hash(),
         FIRST_CHECK={"ok": True, "message": ""},
         ENABLE_AUTH=env_flag_true(os.getenv("ENABLE_AUTH")),
+        ENABLE_AUTH=str(os.getenv("ENABLE_AUTH", "false")).lower() == "true",
     )
     app.secret_key = os.getenv("SECRET_KEY", "flowform-dev-secret")
 
@@ -1151,6 +1152,88 @@ def create_app(port: int | None = None) -> Flask:
             "auth_enabled": auth_enabled(),
             "current_session_user_id": session.get("user_id"),
         }
+
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+
+    def init_db_safely() -> dict:
+        try:
+            connection = sqlite3.connect(db_path)
+            apply_schema_migrations(connection)
+            get_or_create_founder_user(connection)
+            seed_templates(connection)
+            connection.commit()
+            connection.close()
+            return {"ok": True, "message": "db_ready"}
+        except sqlite3.Error as exc:
+            app.logger.warning("SQLite init degraded: %s", exc)
+            return {"ok": False, "message": f"SQLite init degraded: {exc}"}
 
     def init_db_safely() -> dict:
         try:
@@ -1257,6 +1340,71 @@ def create_app(port: int | None = None) -> Flask:
     def logout():
         session.clear()
         return redirect(url_for("login_page") if auth_enabled() else url_for("ready"))
+        return render_template("ready.html")
+
+    @app.get("/signup")
+    def signup_page():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        return render_template("signup.html")
+
+    @app.post("/signup")
+    def signup_submit():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        display_name = str(request.form.get("display_name", "")).strip() or "User"
+        if not email or not password:
+            return render_template("signup.html", error="Email and password are required."), 400
+
+        connection = sqlite3.connect(db_path)
+        exists = connection.execute("SELECT id FROM users WHERE lower(email) = ?", (email,)).fetchone()
+        if exists:
+            connection.close()
+            return render_template("signup.html", error="Email already registered."), 400
+        now = utc_now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO users (email, display_name, password_hash, role, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, 'member', 1, ?, ?)
+            """,
+            (email, display_name, generate_password_hash(password), now, now),
+        )
+        user_id = int(cursor.lastrowid)
+        ensure_subscription_row(connection, user_id)
+        connection.commit()
+        connection.close()
+        session["user_id"] = user_id
+        return redirect(url_for("ready"))
+
+    @app.get("/login")
+    def login_page():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        return render_template("login.html")
+
+    @app.post("/login")
+    def login_submit():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        connection = sqlite3.connect(db_path)
+        row = connection.execute(
+            "SELECT id, password_hash, enabled FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+        connection.close()
+        if (not row) or int(row[2]) == 0 or not check_password_hash(str(row[1] or ""), password):
+            return render_template("login.html", error="Invalid credentials."), 401
+        session["user_id"] = int(row[0])
+        return redirect(url_for("ready"))
+
+    @app.get("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login_page") if auth_enabled() else url_for("ready"))
 
     @app.get("/health")
     def health():
@@ -1343,6 +1491,7 @@ def create_app(port: int | None = None) -> Flask:
                         "benefits": ["unlimited_plans", "priority_support", "early_access_ai"],
                         "pay_now_link": None,
                     }), 403
+            user_id = get_or_create_founder_user(connection)
 
             profile_row = connection.execute(
                 "SELECT id FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
@@ -1382,6 +1531,7 @@ def create_app(port: int | None = None) -> Flask:
             plan_id = int(cursor.lastrowid)
 
             pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session, None if is_paid else 3)
+            pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session)
             if not pool:
                 raise sqlite3.IntegrityError("session_template empty; cannot generate plan")
             items = build_plan_structure(pool, ordered_disciplines, days_per_week, minutes_per_session, weeks=4)
@@ -1428,6 +1578,7 @@ def create_app(port: int | None = None) -> Flask:
         now = utc_now_iso()
         try:
             user_id = current_user_id(connection)
+            user_id = get_or_create_founder_user(connection)
             row = current_plan_record(connection, user_id)
             if row is None:
                 raise sqlite3.IntegrityError("No plan found")
@@ -1514,6 +1665,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def recovery():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         rows = connection.execute(
             """
             SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
@@ -1561,6 +1716,7 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         try:
             user_id = current_user_id(connection)
+            user_id = get_or_create_founder_user(connection)
             existing = connection.execute(
                 "SELECT id FROM recovery_checkin WHERE user_id = ? AND date = ?",
                 (user_id, checkin_date),
@@ -1600,6 +1756,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def plan_current():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         plan = current_plan_record(connection, user_id)
         if plan is None:
             connection.close()
@@ -1615,6 +1775,10 @@ def create_app(port: int | None = None) -> Flask:
             LEFT JOIN session_completion sc ON sc.plan_day_id = pd.id
             WHERE pd.plan_id = ?
             GROUP BY pd.id, pd.week, pd.day_index, pd.title, st.name, st.discipline, st.duration_minutes
+            SELECT pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
             ORDER BY pd.week ASC, pd.day_index ASC
             """,
             (int(plan["id"]),),
@@ -1712,6 +1876,27 @@ def create_app(port: int | None = None) -> Flask:
             sql += f"\nLIMIT {int(limit_templates)}"
 
         rows = connection.execute(sql).fetchall()
+        user_id = current_user_id(connection)
+        limit_clause = ""
+        if user_id > 0 and not has_paid_access(connection, user_id):
+            limit_clause = "LIMIT 3"
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"""
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
+            {limit_clause}
+    def templates_catalog():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
+            """
+        ).fetchall()
         connection.close()
         return render_template("templates_catalog.html", templates=[dict(r) for r in rows])
 
@@ -1724,6 +1909,9 @@ def create_app(port: int | None = None) -> Flask:
         snapshot = analytics_snapshot(connection, user_id)
         connection.close()
         return render_template("analytics.html", analytics=snapshot)
+        data = analytics_snapshot(connection, user_id)
+        connection.close()
+        return render_template("analytics.html", analytics=data)
 
     @app.get("/assistant")
     @require_login
@@ -1794,6 +1982,13 @@ def create_app(port: int | None = None) -> Flask:
         connection.commit()
         connection.close()
         return jsonify({"ok": True, "response": response_text, "mode": mode})
+    def analytics():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
+        data = analytics_snapshot(connection, user_id)
+        connection.close()
+        return render_template("analytics.html", analytics=data)
 
     @app.get("/settings/profile")
     @require_login
@@ -1897,6 +2092,7 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/session/start/<int:plan_day_id>")
     @require_login
+    @app.get("/session/start/<int:plan_day_id>")
     def session_start(plan_day_id: int):
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1991,6 +2187,8 @@ def create_app(port: int | None = None) -> Flask:
             return jsonify({"error": "completion_not_found"}), 404
 
         return render_template("session_summary.html", completion=row)
+
+        )
 
     @app.post("/api/timeline/update")
     def api_timeline_update():
@@ -2468,6 +2666,349 @@ def create_app(port: int | None = None) -> Flask:
         shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({"ok": True, "restored": summary})
 
+    @app.get("/exports")
+    @require_login
+    def exports_page():
+        return render_template("exports.html")
+
+    @app.get("/restore")
+    @require_login
+    def restore_page():
+        return render_template("restore.html")
+
+    @app.get("/api/export/plan")
+    @require_login
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        html = render_plan_export_html(payload)
+        response = make_response(html)
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_plan_export.html"
+        return response
+
+    @app.get("/api/export/history.csv")
+    @require_login
+    def api_export_history_csv():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+
+        completions = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.week, pd.day_index, pd.title
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            JOIN plan p ON p.id = pd.plan_id
+            WHERE p.user_id = ?
+            ORDER BY sc.completed_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        recovery = connection.execute(
+            """
+            SELECT id, date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
+            FROM recovery_checkin
+            WHERE user_id = ?
+            ORDER BY date DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        connection.close()
+
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        writer.writerow(["section", "id", "date", "week", "day", "title", "rpe", "minutes_done", "sleep_hours", "stress", "soreness", "mood", "notes"])
+        for row in completions:
+            writer.writerow([
+                "completion",
+                row["id"],
+                row["completed_at"],
+                row["week"],
+                row["day_index"],
+                row["title"] or "",
+                row["rpe"],
+                row["minutes_done"],
+                "", "", "", "",
+                row["notes"] or "",
+            ])
+        for row in recovery:
+            writer.writerow([
+                "recovery",
+                row["id"],
+                row["date"],
+                "", "", "", "", "",
+                row["sleep_hours"],
+                row["stress_1_10"],
+                row["soreness_1_10"],
+                row["mood_1_10"],
+                row["notes"] or "",
+            ])
+
+        response = make_response(stream.getvalue())
+        response.headers["Content-Type"] = "text/csv; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_history.csv"
+        return response
+
+    @app.get("/api/export/json")
+    @require_login
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        response = make_response(json.dumps(payload, indent=2))
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_backup.json"
+        return response
+
+    @app.get("/api/export/zip")
+    @require_login
+    def api_export_zip():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+    def api_export_zip():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        html = render_plan_export_html(payload)
+        json_blob = json.dumps(payload, indent=2)
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("flowform_plan_export.html", html)
+            zf.writestr("flowform_backup.json", json_blob)
+            if Path(app.config["DB_PATH"]).exists():
+                zf.write(app.config["DB_PATH"], arcname="flowform.db")
+        memory.seek(0)
+
+        return send_file(
+            memory,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="flowform_export_bundle.zip",
+        )
+
+    @app.get("/api/export/backup")
+    @require_login
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        manifest = backup_manifest(connection)
+        connection.close()
+
+        settings_payload = {
+            "app_name": app.config.get("APP_NAME"),
+            "version": app.config.get("VERSION"),
+            "port": app.config.get("PORT"),
+            "build_date": app.config.get("BUILD_DATE"),
+        }
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if Path(app.config["DB_PATH"]).exists():
+                zf.write(app.config["DB_PATH"], arcname="flowform.db")
+            zf.writestr("flowform_backup.json", json.dumps(payload, indent=2))
+            zf.writestr("settings.json", json.dumps(settings_payload, indent=2))
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+            if MEDIA_DIR.exists():
+                for item in MEDIA_DIR.iterdir():
+                    if item.is_file():
+                        zf.write(item, arcname=f"media/{item.name}")
+        memory.seek(0)
+        return send_file(memory, mimetype="application/zip", as_attachment=True, download_name="flowform_full_backup.zip")
+
+    @app.get("/api/export/plan_pdf/<int:plan_id>")
+    @require_login
+    def api_export_plan_pdf(plan_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        plan = connection.execute("SELECT id, name, start_date, weeks, status FROM plan WHERE id = ?", (plan_id,)).fetchone()
+        if plan is None:
+            connection.close()
+            return jsonify({"error": "plan_not_found"}), 404
+        days = connection.execute(
+            """
+            SELECT pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
+            ORDER BY pd.week ASC, pd.day_index ASC
+            """,
+            (plan_id,),
+        ).fetchall()
+        connection.close()
+
+        lines = [
+            f"Plan: {plan['name']} (status: {plan['status']})",
+            f"Start: {plan['start_date']} | Weeks: {plan['weeks']}",
+            "",
+            "4-week schedule:",
+        ]
+        for row in days:
+            lines.append(
+                f"W{row['week']} D{row['day_index']} | {row['title'] or row['template_name'] or 'Session'} | {row['discipline'] or '-'} | {row['duration_minutes'] or 0} min"
+            )
+        pdf = build_simple_pdf(lines, title="FlowForm Plan PDF Export")
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_plan_{plan_id}.pdf")
+
+    @app.get("/api/export/session_summary/<int:completion_id>")
+    @require_login
+    def api_export_session_summary_pdf(completion_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.title, pd.week, pd.day_index, st.name AS template_name, st.json_blocks
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE sc.id = ?
+            """,
+            (completion_id,),
+        ).fetchone()
+        connection.close()
+        if row is None:
+            return jsonify({"error": "completion_not_found"}), 404
+
+        blocks = blocks_from_json(row["json_blocks"] or "")
+        lines = [
+            f"Session title: {row['title'] or row['template_name'] or 'Session'}",
+            f"Completed at: {row['completed_at']}",
+            f"Week/Day: W{row['week']} D{row['day_index']}",
+            f"RPE: {row['rpe']} | Minutes: {row['minutes_done']}",
+            f"Notes: {row['notes'] or ''}",
+            "",
+            "Blocks:",
+        ]
+        for block in blocks:
+            lines.append(f"- {block.get('name', 'Block')} ({block.get('minutes', 0)} min)")
+        pdf = build_simple_pdf(lines, title="FlowForm Session Summary PDF")
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_session_{completion_id}.pdf")
+
+    @app.post("/api/import/backup")
+    @require_login
+    def api_import_backup():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"ok": False, "error": "file_required"}), 400
+
+        should_confirm = str((request.form.get("confirm_overwrite") or "false")).lower() in {"true", "1", "yes"}
+        raw = upload.read()
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile:
+            return jsonify({"ok": False, "error": "invalid_zip"}), 400
+
+        names = set(zf.namelist())
+        ok, error_code = validate_backup_zip_names(names)
+        if not ok:
+            return jsonify({"ok": False, "error": error_code, "message": "Backup ZIP contains invalid or unsafe paths."}), 400
+        if "flowform.db" not in names:
+            return jsonify({"ok": False, "error": "flowform.db_missing"}), 400
+
+        manifest = {}
+        if "manifest.json" in names:
+            try:
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+            except Exception:
+                manifest = {}
+
+        summary = {
+            "plans": int((manifest.get("counts") or {}).get("plans", 0)),
+            "templates": int((manifest.get("counts") or {}).get("templates", 0)),
+            "completions": int((manifest.get("counts") or {}).get("completions", 0)),
+            "recovery": int((manifest.get("counts") or {}).get("recovery", 0)),
+            "media_files": int(manifest.get("media_files", 0)),
+            "warning": "Restoring this backup will overwrite current data.",
+        }
+
+        if not should_confirm:
+            return jsonify({"ok": True, "requires_confirmation": True, "summary": summary})
+
+        db_target = Path(app.config["DB_PATH"])
+        db_target.parent.mkdir(parents=True, exist_ok=True)
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="flowform-restore-"))
+        stage_db = temp_dir / "flowform.db"
+        stage_media = temp_dir / "media"
+        stage_media.mkdir(exist_ok=True)
+        old_db = db_target.with_suffix(".pre_restore.bak")
+        old_media = MEDIA_DIR.parent / "media_pre_restore"
+
+        try:
+            stage_db.write_bytes(zf.read("flowform.db"))
+            for name in names:
+                if name.startswith("media/") and not name.endswith("/"):
+                    out = stage_media / Path(name).name
+                    out.write_bytes(zf.read(name))
+
+            probe = sqlite3.connect(stage_db)
+            required = {"plan", "plan_day", "session_template", "session_completion", "recovery_checkin"}
+            existing = {r[0] for r in probe.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            probe.close()
+            if not required.issubset(existing):
+                raise ValueError("backup_database_schema_invalid")
+
+            old_db = db_target.with_suffix(".pre_restore.bak")
+            if db_target.exists():
+                shutil.copy2(db_target, old_db)
+
+            tmp_live_db = db_target.with_suffix(".restore_tmp")
+            shutil.copy2(stage_db, tmp_live_db)
+            tmp_live_db.replace(db_target)
+
+            old_media = MEDIA_DIR.parent / "media_pre_restore"
+            if old_media.exists():
+                shutil.rmtree(old_media)
+            if MEDIA_DIR.exists():
+                MEDIA_DIR.replace(old_media)
+            shutil.copytree(stage_media, MEDIA_DIR, dirs_exist_ok=True)
+            if old_media.exists():
+                shutil.rmtree(old_media)
+            if old_db.exists():
+                old_db.unlink(missing_ok=True)
+
+        except Exception as exc:
+            if old_db.exists():
+                try:
+                    shutil.copy2(old_db, db_target)
+                except Exception:
+                    pass
+            if old_media.exists():
+                try:
+                    if MEDIA_DIR.exists():
+                        shutil.rmtree(MEDIA_DIR)
+                    old_media.replace(MEDIA_DIR)
+                except Exception:
+                    pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"ok": False, "error": "restore_failed", "message": str(exc)}), 400
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({"ok": True, "restored": summary})
+
     @app.post("/api/export")
     def api_export():
         return jsonify({"ok": True, "route": "/api/export"})
@@ -2580,6 +3121,10 @@ def create_app(port: int | None = None) -> Flask:
             "/api/export/plan_pdf/<plan_id>",
             "/api/export/session_summary/<completion_id>",
             "/api/import/backup",
+            "/api/recovery/checkin",
+            "/api/export/plan",
+            "/api/export/json",
+            "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",
             "/ready",
@@ -2628,6 +3173,7 @@ def create_app(port: int | None = None) -> Flask:
         }
         connection.close()
         return render_template("ready.html", counts=counts)
+        return render_template("ready.html")
 
     return app
 

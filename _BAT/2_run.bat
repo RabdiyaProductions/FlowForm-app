@@ -13,3 +13,4 @@ if defined _NEED_PAUSE (
 )
 
 endlocal & exit /b %EXIT_CODE%
+endlocal

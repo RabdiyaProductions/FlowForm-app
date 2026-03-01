@@ -28,6 +28,11 @@ while time.time()<end:
 sys.exit(0 if ok else 1)"
 if errorlevel 1 (
   echo [FlowForm] ERROR: server did not pass /health on port %PORT%.
+start "FlowForm Server" "%VENV_PY%" "%ROOT%run_server.py" --port %PORT%
+
+"%VENV_PY%" "%ROOT%boot_port.py" --wait --port %PORT% --timeout 40
+if errorlevel 1 (
+  echo [FlowForm] ERROR: server did not become ready on port %PORT%.
   exit /b 1
 )
 
