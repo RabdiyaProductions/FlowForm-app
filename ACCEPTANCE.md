@@ -172,3 +172,31 @@ Recovery drill:
 - ZIP always includes `issue_ref.txt`, `project.json`, `pilot_pack.json`, `export_meta.json`, `WORKFLOW.md`, `manifest.json`,
 - `manifest.json` includes every ZIP file and includes `export_meta.json`,
 - each manifest item includes `path`, `bytes`, and `sha256`.
+
+
+## Journey 14 — Assistant works with and without API key
+**Steps**
+1. Open `/assistant`.
+2. Click each preset button and send a prompt.
+3. Verify a response appears with the safety disclaimer.
+4. Test an injury/symptom prompt (for example chest pain/dizziness).
+5. Run without `OPENAI_API_KEY` and repeat one prompt.
+
+**Accept if**
+- presets are available for plan tweak/substitution/recovery/motivation,
+- responses are returned without crashes/hangs,
+- responses always include the disclaimer,
+- severe symptom prompts include escalation language to seek medical advice,
+- fallback rules engine provides useful guidance when API key is missing or provider fails.
+
+
+## Journey 15 — Media upload and block attachment works
+**Steps**
+1. Open `/media` and upload an image/audio/video file with tags.
+2. Open `/templates`, click **Template Builder** for a template, and attach the media to block 1.
+3. Create/refresh plan and open `/session/start/<plan_day_id>` that uses that template.
+
+**Accept if**
+- upload persists in media library with metadata/tags,
+- template block saves linked media selection,
+- session player shows linked media for the active block.

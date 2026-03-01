@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import hashlib
+import mimetypes
 import os
 import sqlite3
 import subprocess
@@ -21,6 +22,7 @@ from functools import wraps
 
 from flask import Flask, jsonify, make_response, redirect, render_template, request, send_file, url_for, session
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 
 APP_NAME = "FlowForm Vitality Master Suite"
 APP_VERSION = "0.1.3"
@@ -291,6 +293,24 @@ def apply_schema_migrations(connection: sqlite3.Connection) -> None:
             prompt TEXT NOT NULL,
             response TEXT NOT NULL,
             mode TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_item (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            tags TEXT NOT NULL DEFAULT '',
+            duration_sec INTEGER,
+            uploaded_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
@@ -581,6 +601,69 @@ def blocks_from_json(raw: str) -> list[dict]:
             minutes_int = max(0, int(minutes))
         except (TypeError, ValueError):
             minutes_int = 0
+        media_item_id = block.get("media_item_id")
+        try:
+            media_item_id = int(media_item_id) if media_item_id is not None else None
+        except (TypeError, ValueError):
+            media_item_id = None
+        normalized.append({
+            "name": name,
+            "minutes": minutes_int,
+            "seconds": minutes_int * 60,
+            "media_item_id": media_item_id,
+        })
+    return normalized
+
+
+def parse_tags(raw: str) -> str:
+    parts = [item.strip().lower() for item in str(raw or "").split(",") if item.strip()]
+    deduped = []
+    for item in parts:
+        if item not in deduped:
+            deduped.append(item)
+    return ", ".join(deduped)
+
+
+def detect_media_type(filename: str, mimetype_header: str | None) -> str:
+    mime = (mimetype_header or "").lower()
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    guessed, _ = mimetypes.guess_type(filename)
+    guessed = (guessed or "").lower()
+    if guessed.startswith("image/"):
+        return "image"
+    if guessed.startswith("video/"):
+        return "video"
+    if guessed.startswith("audio/"):
+        return "audio"
+    return "other"
+
+
+def enrich_blocks_with_media(connection: sqlite3.Connection, blocks: list[dict]) -> list[dict]:
+    media_ids = sorted({int(b.get("media_item_id")) for b in blocks if b.get("media_item_id")})
+    media_map: dict[int, dict] = {}
+    if media_ids:
+        placeholders = ",".join("?" for _ in media_ids)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"SELECT id, filename, original_name, media_type, tags, duration_sec FROM media_item WHERE id IN ({placeholders})",
+            tuple(media_ids),
+        ).fetchall()
+        media_map = {int(r["id"]): dict(r) for r in rows}
+
+    hydrated = []
+    for block in blocks:
+        item = dict(block)
+        mid = item.get("media_item_id")
+        item["media"] = media_map.get(int(mid)) if mid else None
+        hydrated.append(item)
+    return hydrated
+
+
         normalized.append({"name": name, "minutes": minutes_int, "seconds": minutes_int * 60})
     return normalized
 
@@ -1135,6 +1218,23 @@ def create_app(port: int | None = None) -> Flask:
         def wrapped(*args, **kwargs):
             if not auth_enabled():
                 return view(*args, **kwargs)
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
             connection = sqlite3.connect(db_path)
             uid = current_user_id(connection)
             connection.close()
@@ -1856,6 +1956,122 @@ def create_app(port: int | None = None) -> Flask:
             suggestion=suggestion,
         )
 
+    @app.get("/media")
+    @require_login
+    def media_library():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        items = connection.execute(
+            """
+            SELECT id, filename, original_name, media_type, tags, duration_sec, uploaded_at
+            FROM media_item
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        connection.close()
+        return render_template("media.html", items=[dict(r) for r in items])
+
+    @app.post("/media/upload")
+    @require_login
+    def media_upload():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return redirect(url_for("media_library"))
+
+        safe_name = secure_filename(upload.filename)
+        if not safe_name:
+            return redirect(url_for("media_library"))
+
+        blob = upload.read()
+        if len(blob) > 250 * 1024 * 1024:
+            return jsonify({"ok": False, "error": "file_too_large", "message": "Max file size is 250MB."}), 400
+
+        media_type = detect_media_type(safe_name, upload.mimetype)
+        if media_type == "other":
+            return jsonify({"ok": False, "error": "unsupported_media_type", "message": "Only image/audio/video uploads are supported."}), 400
+
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+        unique_name = f"{int(datetime.now(timezone.utc).timestamp())}_{safe_name}"
+        path = MEDIA_DIR / unique_name
+        path.write_bytes(blob)
+
+        tags = parse_tags(request.form.get("tags", ""))
+        duration_raw = request.form.get("duration_sec")
+        try:
+            duration_sec = int(duration_raw) if duration_raw else None
+        except ValueError:
+            duration_sec = None
+
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        now = utc_now_iso()
+        connection.execute(
+            """
+            INSERT INTO media_item (user_id, filename, original_name, media_type, tags, duration_sec, uploaded_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, unique_name, upload.filename, media_type, tags, duration_sec, now, now, now),
+        )
+        connection.commit()
+        connection.close()
+        return redirect(url_for("media_library"))
+
+    @app.post("/media/<int:media_id>/delete")
+    @require_login
+    def media_delete(media_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        row = connection.execute("SELECT id, filename FROM media_item WHERE id = ? AND user_id = ?", (media_id, user_id)).fetchone()
+        if row is None:
+            connection.close()
+            return jsonify({"ok": False, "error": "media_not_found"}), 404
+
+        connection.execute("DELETE FROM media_item WHERE id = ?", (media_id,))
+        connection.commit()
+        connection.close()
+
+        media_path = MEDIA_DIR / row["filename"]
+        if media_path.exists():
+            media_path.unlink(missing_ok=True)
+        return redirect(url_for("media_library"))
+
+    @app.post("/media/<int:media_id>/tags")
+    @require_login
+    def media_update_tags(media_id: int):
+        tags = parse_tags(request.form.get("tags", ""))
+        duration_raw = request.form.get("duration_sec")
+        try:
+            duration_sec = int(duration_raw) if duration_raw else None
+        except ValueError:
+            duration_sec = None
+
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        updated = connection.execute(
+            "UPDATE media_item SET tags = ?, duration_sec = ?, updated_at = ? WHERE id = ? AND user_id = ?",
+            (tags, duration_sec, utc_now_iso(), media_id, user_id),
+        ).rowcount
+        connection.commit()
+        connection.close()
+        if updated == 0:
+            return jsonify({"ok": False, "error": "media_not_found"}), 404
+        return redirect(url_for("media_library"))
+
+    @app.get("/media/file/<path:filename>")
+    @require_login
+    def media_file(filename: str):
+        safe = secure_filename(filename)
+        if not safe:
+            return jsonify({"error": "invalid_filename"}), 400
+        path = MEDIA_DIR / safe
+        if not path.exists() or not path.is_file():
+            return jsonify({"error": "media_not_found"}), 404
+        return send_file(path)
+
     @app.get("/templates")
     @require_login
     def templates_catalog():
@@ -1876,6 +2092,69 @@ def create_app(port: int | None = None) -> Flask:
             sql += f"\nLIMIT {int(limit_templates)}"
 
         rows = connection.execute(sql).fetchall()
+        media_count = connection.execute("SELECT COUNT(*) FROM media_item WHERE user_id = ?", (user_id,)).fetchone()[0]
+        connection.close()
+        return render_template("templates_catalog.html", templates=[dict(r) for r in rows], media_count=int(media_count))
+
+    @app.get("/templates/builder/<int:template_id>")
+    @require_login
+    def template_builder(template_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        template_row = connection.execute(
+            "SELECT id, name, discipline, duration_minutes, level, json_blocks FROM session_template WHERE id = ?",
+            (template_id,),
+        ).fetchone()
+        if template_row is None:
+            connection.close()
+            return jsonify({"error": "template_not_found"}), 404
+
+        media_items = connection.execute(
+            "SELECT id, original_name, media_type, tags FROM media_item WHERE user_id = ? ORDER BY id DESC",
+            (user_id,),
+        ).fetchall()
+        blocks = blocks_from_json(template_row["json_blocks"] or "")
+        blocks = enrich_blocks_with_media(connection, blocks)
+        connection.close()
+        return render_template(
+            "template_builder.html",
+            template=dict(template_row),
+            blocks=blocks,
+            media_items=[dict(r) for r in media_items],
+        )
+
+    @app.post("/templates/builder/<int:template_id>/save")
+    @require_login
+    def template_builder_save(template_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        template_row = connection.execute(
+            "SELECT id, json_blocks FROM session_template WHERE id = ?",
+            (template_id,),
+        ).fetchone()
+        if template_row is None:
+            connection.close()
+            return jsonify({"ok": False, "error": "template_not_found"}), 404
+
+        blocks = blocks_from_json(template_row["json_blocks"] or "")
+        for idx, block in enumerate(blocks):
+            media_value = request.form.get(f"media_item_id_{idx}", "")
+            try:
+                media_id = int(media_value) if media_value else None
+            except ValueError:
+                media_id = None
+            block["media_item_id"] = media_id
+            block.pop("seconds", None)
+
+        payload = {"blocks": blocks}
+        connection.execute(
+            "UPDATE session_template SET json_blocks = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(payload), utc_now_iso(), template_id),
+        )
+        connection.commit()
+        connection.close()
+        return redirect(url_for("template_builder", template_id=template_id))
         user_id = current_user_id(connection)
         limit_clause = ""
         if user_id > 0 and not has_paid_access(connection, user_id):
@@ -2106,6 +2385,9 @@ def create_app(port: int | None = None) -> Flask:
             """,
             (plan_day_id,),
         ).fetchone()
+
+        if row is None:
+            connection.close()
         connection.close()
 
         if row is None:
@@ -2114,6 +2396,9 @@ def create_app(port: int | None = None) -> Flask:
         blocks = blocks_from_json(row["json_blocks"] or "")
         if not blocks:
             duration = int(row["duration_minutes"] or 30)
+            blocks = [{"name": row["template_name"] or "Session", "minutes": duration, "seconds": duration * 60, "media_item_id": None}]
+        blocks = enrich_blocks_with_media(connection, blocks)
+        connection.close()
             blocks = [{"name": row["template_name"] or "Session", "minutes": duration, "seconds": duration * 60}]
 
         return render_template(

@@ -189,6 +189,40 @@ Exact click steps:
 2. Submit daily check-in.
 3. Open `/plan/current`.
 4. Verify readiness badge and low-readiness suggestion (when applicable).
+
+
+### 8) In-app assistant coach
+#### UI route: `GET /assistant`
+Behavior:
+- prompt box plus preset actions: **Tweak my plan**, **Suggest today's substitute**, **Recovery advice**, **Motivate me**.
+- shows recent assistant interactions (last 20).
+
+#### API route: `POST /api/assistant/chat`
+Behavior:
+- if `OPENAI_API_KEY` is present, attempts provider response with a 10s timeout and safe coaching system prompt,
+- on provider timeout/error, gracefully falls back to rules-based coaching (no crash/hang),
+- without API key, uses rules-based suggestions from current plan + last recovery + recent completions,
+- always prepends a safety disclaimer and escalates injury/severe symptom prompts with medical-advice language.
+
+
+### 9) Personal media library + block attachments
+#### UI route: `GET /media`
+Behavior:
+- upload personal image/audio/video files,
+- edit tags and optional duration metadata,
+- delete with confirmation,
+- serves playable/previewable files from `instance/media/`.
+
+#### Storage
+- uploads are saved to `instance/media/`,
+- metadata stored in `media_item` table: `filename`, `original_name`, `media_type`, `tags`, `duration_sec`, `uploaded_at`.
+
+#### Template Builder attachment flow
+- `GET /templates/builder/<template_id>` shows template blocks and media selector per block,
+- `POST /templates/builder/<template_id>/save` links selected media to blocks (`media_item_id` in `json_blocks`).
+
+#### Session Player integration
+- `GET /session/start/<plan_day_id>` now hydrates block media and shows linked media (image/audio/video) while playing the block.
 ## Founder-critical plan flow (implemented)
 
 ### UI Route: `/plan/wizard` (GET)
