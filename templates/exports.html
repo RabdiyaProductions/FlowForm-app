@@ -14,6 +14,10 @@
     <a class="btn" href="/api/export/json">Download Full Backup JSON</a>
     <a class="btn" href="/api/export/zip">Download ZIP Bundle</a>
     <a class="btn" href="/api/export/history.csv">Export History (CSV)</a>
+    <a class="btn" href="/api/export/backup">Download full backup</a>
+    <a class="btn" href="/api/export/plan">Download Plan HTML</a>
+    <a class="btn" href="/api/export/json">Download Full Backup JSON</a>
+    <a class="btn" href="/api/export/zip">Download ZIP Bundle</a>
   </div>
   <ul>
     <li><strong>Full backup:</strong> SQLite DB + JSON snapshot + settings + media files.</li>
@@ -48,4 +52,9 @@ document.getElementById('sessionPdfBtn').addEventListener('click', () => {
   }
 });
 </script>
+    <li><strong>Plan HTML:</strong> printable plan + completion status.</li>
+    <li><strong>Backup JSON:</strong> includes plan, templates, completions, recovery.</li>
+    <li><strong>ZIP Bundle:</strong> DB + JSON + plan HTML.</li>
+  </ul>
+</div>
 {% endblock %}
