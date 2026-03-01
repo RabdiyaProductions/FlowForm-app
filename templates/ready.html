@@ -1,0 +1,20 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>System Ready</h1>
+  <p class="muted">Live status from /api/health.</p>
+  <p>Status: <span id="status">...</span></p>
+  <p>Port: <span id="port">...</span></p>
+  <p>DB: <span id="db">...</span></p>
+</div>
+<script>
+(async () => {
+  const res = await fetch('/api/health');
+  if (!res.ok) return;
+  const data = await res.json();
+  document.getElementById('status').textContent = data.status;
+  document.getElementById('port').textContent = data.port;
+  document.getElementById('db').textContent = data.db_ok ? 'ok' : 'degraded';
+})();
+</script>
+{% endblock %}

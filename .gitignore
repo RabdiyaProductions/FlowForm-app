@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+ACTIVE_PORTS.json
+.env
+
+logs/
