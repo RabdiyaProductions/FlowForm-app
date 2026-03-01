@@ -13,14 +13,10 @@ import shutil
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from functools import wraps
 
-from flask import Flask, jsonify, make_response, redirect, render_template, request, send_file, url_for
-from datetime import date, datetime, timedelta, timezone
-from datetime import date, datetime, timezone
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
-
-from flask import Flask, jsonify, redirect, render_template, request, url_for
+from flask import Flask, jsonify, make_response, redirect, render_template, request, send_file, url_for, session
+from werkzeug.security import check_password_hash, generate_password_hash
 
 APP_NAME = "FlowForm Vitality Master Suite"
 APP_VERSION = "0.1.3"
@@ -155,6 +151,9 @@ def apply_schema_migrations(connection: sqlite3.Connection) -> None:
     )
     ensure_column(connection, "users", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
     ensure_column(connection, "users", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "users", "password_hash", "password_hash TEXT")
+    ensure_column(connection, "users", "role", "role TEXT NOT NULL DEFAULT 'member'")
+    ensure_column(connection, "users", "enabled", "enabled INTEGER NOT NULL DEFAULT 1")
 
     connection.execute(
         """
@@ -269,6 +268,22 @@ def apply_schema_migrations(connection: sqlite3.Connection) -> None:
 
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'free',
+            status TEXT NOT NULL DEFAULT 'active',
+            start_date TEXT,
+            end_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS _healthcheck (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             checked_at TEXT NOT NULL
@@ -318,6 +333,46 @@ def get_or_create_founder_user(connection: sqlite3.Connection) -> int:
         ("founder@flowform.local", "Founder", now, now),
     )
     return int(cursor.lastrowid)
+
+
+def ensure_subscription_row(connection: sqlite3.Connection, user_id: int) -> None:
+    row = connection.execute("SELECT id FROM subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()
+    if row:
+        return
+    now = utc_now_iso()
+    connection.execute(
+        """
+        INSERT INTO subscriptions (user_id, plan, status, start_date, end_date, created_at, updated_at)
+        VALUES (?, 'free', 'active', ?, NULL, ?, ?)
+        """,
+        (user_id, date.today().isoformat(), now, now),
+    )
+
+
+def user_subscription(connection: sqlite3.Connection, user_id: int) -> dict:
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
+        """
+        SELECT plan, status, start_date, end_date
+        FROM subscriptions
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    if row is None:
+        ensure_subscription_row(connection, user_id)
+        row = connection.execute(
+            "SELECT plan, status, start_date, end_date FROM subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    return dict(row) if row else {"plan": "free", "status": "active"}
+
+
+def has_paid_access(connection: sqlite3.Connection, user_id: int) -> bool:
+    sub = user_subscription(connection, user_id)
+    return sub.get("plan") == "paid" and sub.get("status") == "active"
 
 
 def db_integrity_snapshot(db_path: Path) -> dict:
@@ -379,6 +434,7 @@ def preferred_disciplines(payload: dict) -> list[str]:
     return deduped or GOAL_DEFAULTS["hybrid"]
 
 
+def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int, limit_templates: int | None = None) -> list[dict]:
 def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int) -> list[dict]:
     rows = connection.execute(
         """
@@ -410,6 +466,8 @@ def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: lis
             item["id"],
         )
     )
+    if limit_templates is not None:
+        return mapped[: max(1, int(limit_templates))]
     return mapped
 
 
@@ -855,9 +913,62 @@ def create_app(port: int | None = None) -> Flask:
         BUILD_DATE=BUILD_DATE,
         GIT_HASH=git_hash(),
         FIRST_CHECK={"ok": True, "message": ""},
+        ENABLE_AUTH=str(os.getenv("ENABLE_AUTH", "false")).lower() == "true",
     )
+    app.secret_key = os.getenv("SECRET_KEY", "flowform-dev-secret")
 
     app.logger.info("FlowForm boot config: port=%s db=%s", resolved_port, db_path)
+
+    def auth_enabled() -> bool:
+        return bool(app.config.get("ENABLE_AUTH", False))
+
+    def current_user_id(connection: sqlite3.Connection) -> int:
+        if not auth_enabled():
+            return get_or_create_founder_user(connection)
+        user_id = session.get("user_id")
+        if not user_id:
+            return 0
+        row = connection.execute("SELECT id, enabled FROM users WHERE id = ?", (int(user_id),)).fetchone()
+        if not row or int(row[1]) == 0:
+            session.clear()
+            return 0
+        return int(row[0])
+
+    def require_login(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if not auth_enabled():
+                return view(*args, **kwargs)
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+
+    def init_db_safely() -> dict:
+        try:
+            connection = sqlite3.connect(db_path)
+            apply_schema_migrations(connection)
+            get_or_create_founder_user(connection)
+            seed_templates(connection)
+            connection.commit()
+            connection.close()
+            return {"ok": True, "message": "db_ready"}
+        except sqlite3.Error as exc:
+            app.logger.warning("SQLite init degraded: %s", exc)
+            return {"ok": False, "message": f"SQLite init degraded: {exc}"}
 
     def init_db_safely() -> dict:
         try:
@@ -897,7 +1008,73 @@ def create_app(port: int | None = None) -> Flask:
         check = first_check_state(app)
         if not check.get("ok", False):
             return render_template("first_run_error.html", error_message=check.get("message", "Unknown startup check failure")), 500
+        if auth_enabled() and not session.get("user_id"):
+            return redirect(url_for("login_page"))
         return render_template("ready.html")
+
+    @app.get("/signup")
+    def signup_page():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        return render_template("signup.html")
+
+    @app.post("/signup")
+    def signup_submit():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        display_name = str(request.form.get("display_name", "")).strip() or "User"
+        if not email or not password:
+            return render_template("signup.html", error="Email and password are required."), 400
+
+        connection = sqlite3.connect(db_path)
+        exists = connection.execute("SELECT id FROM users WHERE lower(email) = ?", (email,)).fetchone()
+        if exists:
+            connection.close()
+            return render_template("signup.html", error="Email already registered."), 400
+        now = utc_now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO users (email, display_name, password_hash, role, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, 'member', 1, ?, ?)
+            """,
+            (email, display_name, generate_password_hash(password), now, now),
+        )
+        user_id = int(cursor.lastrowid)
+        ensure_subscription_row(connection, user_id)
+        connection.commit()
+        connection.close()
+        session["user_id"] = user_id
+        return redirect(url_for("ready"))
+
+    @app.get("/login")
+    def login_page():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        return render_template("login.html")
+
+    @app.post("/login")
+    def login_submit():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        connection = sqlite3.connect(db_path)
+        row = connection.execute(
+            "SELECT id, password_hash, enabled FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+        connection.close()
+        if (not row) or int(row[2]) == 0 or not check_password_hash(str(row[1] or ""), password):
+            return render_template("login.html", error="Invalid credentials."), 401
+        session["user_id"] = int(row[0])
+        return redirect(url_for("ready"))
+
+    @app.get("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login_page") if auth_enabled() else url_for("ready"))
 
     @app.get("/health")
     def health():
@@ -939,10 +1116,12 @@ def create_app(port: int | None = None) -> Flask:
         )
 
     @app.get("/plan/wizard")
+    @require_login
     def plan_wizard():
         return render_template("plan_wizard.html", disciplines=DISCIPLINES)
 
     @app.post("/api/plan/create")
+    @require_login
     def api_plan_create():
         payload = request.get_json(silent=True) or request.form.to_dict()
 
@@ -963,6 +1142,25 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.execute("PRAGMA foreign_keys = ON")
         try:
+            user_id = current_user_id(connection)
+            if user_id <= 0:
+                raise sqlite3.IntegrityError("auth_required")
+            sub = user_subscription(connection, user_id)
+            is_paid = sub.get("plan") == "paid" and sub.get("status") == "active"
+            if not is_paid:
+                existing_plans = connection.execute(
+                    "SELECT COUNT(*) FROM plan WHERE user_id = ? AND status != 'archived'",
+                    (user_id,),
+                ).fetchone()[0]
+                if int(existing_plans) >= 1:
+                    connection.close()
+                    return jsonify({
+                        "ok": False,
+                        "error": "free_tier_limit_reached",
+                        "message": "Free tier allows 1 active plan. Upgrade for unlimited plans.",
+                        "benefits": ["unlimited_plans", "priority_support", "early_access_ai"],
+                        "pay_now_link": None,
+                    }), 403
             user_id = get_or_create_founder_user(connection)
 
             profile_row = connection.execute(
@@ -1002,6 +1200,7 @@ def create_app(port: int | None = None) -> Flask:
             )
             plan_id = int(cursor.lastrowid)
 
+            pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session, None if is_paid else 3)
             pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session)
             if not pool:
                 raise sqlite3.IntegrityError("session_template empty; cannot generate plan")
@@ -1042,11 +1241,13 @@ def create_app(port: int | None = None) -> Flask:
         return redirect(url_for("plan_current"))
 
     @app.post("/api/plan/regenerate-next-week")
+    @require_login
     def api_plan_regenerate_next_week():
         connection = sqlite3.connect(db_path)
         connection.execute("PRAGMA foreign_keys = ON")
         now = utc_now_iso()
         try:
+            user_id = current_user_id(connection)
             user_id = get_or_create_founder_user(connection)
             row = current_plan_record(connection, user_id)
             if row is None:
@@ -1129,6 +1330,11 @@ def create_app(port: int | None = None) -> Flask:
         return redirect(url_for("plan_current"))
 
     @app.get("/recovery")
+    @require_login
+    def recovery():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
     def recovery():
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1160,6 +1366,7 @@ def create_app(port: int | None = None) -> Flask:
         return render_template("recovery.html", entries=entries, readiness=readiness, today=date.today().isoformat())
 
     @app.post("/api/recovery/checkin")
+    @require_login
     def api_recovery_checkin():
         payload = request.get_json(silent=True) or request.form.to_dict()
         try:
@@ -1178,6 +1385,7 @@ def create_app(port: int | None = None) -> Flask:
 
         connection = sqlite3.connect(db_path)
         try:
+            user_id = current_user_id(connection)
             user_id = get_or_create_founder_user(connection)
             existing = connection.execute(
                 "SELECT id FROM recovery_checkin WHERE user_id = ? AND date = ?",
@@ -1213,6 +1421,11 @@ def create_app(port: int | None = None) -> Flask:
         return redirect(url_for("plan_current"))
 
     @app.get("/plan/current")
+    @require_login
+    def plan_current():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
     def plan_current():
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1314,6 +1527,20 @@ def create_app(port: int | None = None) -> Flask:
         )
 
     @app.get("/templates")
+    @require_login
+    def templates_catalog():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        limit_clause = ""
+        if user_id > 0 and not has_paid_access(connection, user_id):
+            limit_clause = "LIMIT 3"
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            f"""
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
+            {limit_clause}
     def templates_catalog():
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1328,6 +1555,11 @@ def create_app(port: int | None = None) -> Flask:
         return render_template("templates_catalog.html", templates=[dict(r) for r in rows])
 
     @app.get("/analytics")
+    @require_login
+    def analytics():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
     def analytics():
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1336,6 +1568,108 @@ def create_app(port: int | None = None) -> Flask:
         connection.close()
         return render_template("analytics.html", analytics=data)
 
+    @app.get("/settings/profile")
+    @require_login
+    def settings_profile():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        user = connection.execute("SELECT id, email, display_name, role FROM users WHERE id = ?", (user_id,)).fetchone()
+        profile = connection.execute(
+            "SELECT goal, days_per_week, minutes, equipment, constraints FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        sub = user_subscription(connection, user_id)
+        connection.close()
+        return render_template("settings_profile.html", user=user, profile=profile, subscription=sub, auth_enabled=auth_enabled())
+
+    @app.post("/settings/profile")
+    @require_login
+    def settings_profile_submit():
+        payload = request.form
+        display_name = str(payload.get("display_name", "")).strip() or "User"
+        goal = str(payload.get("goal", "hybrid")).strip().lower().replace(" ", "_")
+        days_per_week = clamp_int(int(payload.get("days_per_week", 4)), 2, 6)
+        minutes = clamp_int(int(payload.get("minutes", 45)), 30, 75)
+        equipment = str(payload.get("equipment", "")).strip()
+        constraints = str(payload.get("constraints", "")).strip()
+        now = utc_now_iso()
+
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        connection.execute("UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?", (display_name, now, user_id))
+        row = connection.execute("SELECT id FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)).fetchone()
+        if row:
+            connection.execute(
+                "UPDATE profile SET goal = ?, days_per_week = ?, minutes = ?, equipment = ?, constraints = ?, updated_at = ? WHERE id = ?",
+                (goal, days_per_week, minutes, equipment, constraints, now, row[0]),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO profile (user_id, goal, days_per_week, minutes, equipment, constraints, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, goal, days_per_week, minutes, equipment, constraints, now, now),
+            )
+        connection.commit()
+        connection.close()
+        return redirect(url_for("settings_profile"))
+
+    @app.get("/api/billing/checkout")
+    @require_login
+    def billing_checkout_stub():
+        return jsonify(
+            {
+                "ok": True,
+                "provider": "stripe_stub",
+                "message": "Payment link intentionally unimplemented for safety.",
+                "pay_now_link": None,
+                "paid_benefits": ["unlimited_plans", "priority_support", "early_access_ai"],
+            }
+        )
+
+    @app.get("/admin")
+    @require_login
+    def admin_dashboard():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        actor_id = current_user_id(connection)
+        actor = connection.execute("SELECT role FROM users WHERE id = ?", (actor_id,)).fetchone()
+        if not actor or actor[0] != "admin":
+            connection.close()
+            return jsonify({"error": "admin_only"}), 403
+        rows = connection.execute(
+            """
+            SELECT u.id, u.email, u.display_name, u.role, u.enabled,
+                   COALESCE(s.plan, 'free') AS subscription_plan,
+                   COALESCE(s.status, 'active') AS subscription_status
+            FROM users u
+            LEFT JOIN subscriptions s ON s.user_id = u.id
+            ORDER BY u.id ASC
+            """
+        ).fetchall()
+        connection.close()
+        return render_template("admin.html", users=[dict(r) for r in rows])
+
+    @app.post("/admin/users/<int:user_id>/toggle")
+    @require_login
+    def admin_toggle_user(user_id: int):
+        connection = sqlite3.connect(db_path)
+        actor_id = current_user_id(connection)
+        role = connection.execute("SELECT role FROM users WHERE id = ?", (actor_id,)).fetchone()
+        if not role or role[0] != "admin":
+            connection.close()
+            return jsonify({"error": "admin_only"}), 403
+        row = connection.execute("SELECT enabled FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            connection.close()
+            return jsonify({"error": "user_not_found"}), 404
+        new_state = 0 if int(row[0]) else 1
+        connection.execute("UPDATE users SET enabled = ?, updated_at = ? WHERE id = ?", (new_state, utc_now_iso(), user_id))
+        connection.commit()
+        connection.close()
+        return redirect(url_for("admin_dashboard"))
+
+    @app.get("/session/start/<int:plan_day_id>")
+    @require_login
     @app.get("/session/start/<int:plan_day_id>")
     def session_start(plan_day_id: int):
         connection = sqlite3.connect(db_path)
@@ -1373,6 +1707,7 @@ def create_app(port: int | None = None) -> Flask:
         )
 
     @app.post("/api/session/finish")
+    @require_login
     def api_session_finish():
         payload = request.get_json(silent=True) or request.form.to_dict()
         try:
@@ -1409,6 +1744,7 @@ def create_app(port: int | None = None) -> Flask:
         return jsonify({"ok": True, "completion_id": completion_id, "redirect": f"/session/summary/{completion_id}"})
 
     @app.get("/session/summary/<int:completion_id>")
+    @require_login
     def session_summary(completion_id: int):
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1453,14 +1789,20 @@ def create_app(port: int | None = None) -> Flask:
         return jsonify({"ok": True, "route": "/api/approve"})
 
     @app.get("/exports")
+    @require_login
     def exports_page():
         return render_template("exports.html")
 
     @app.get("/restore")
+    @require_login
     def restore_page():
         return render_template("restore.html")
 
     @app.get("/api/export/plan")
+    @require_login
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
     def api_export_plan():
         connection = sqlite3.connect(db_path)
         user_id = get_or_create_founder_user(connection)
@@ -1474,6 +1816,10 @@ def create_app(port: int | None = None) -> Flask:
         return response
 
     @app.get("/api/export/json")
+    @require_login
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
     def api_export_json():
         connection = sqlite3.connect(db_path)
         user_id = get_or_create_founder_user(connection)
@@ -1486,6 +1832,10 @@ def create_app(port: int | None = None) -> Flask:
         return response
 
     @app.get("/api/export/zip")
+    @require_login
+    def api_export_zip():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
     def api_export_zip():
         connection = sqlite3.connect(db_path)
         user_id = get_or_create_founder_user(connection)
@@ -1511,6 +1861,10 @@ def create_app(port: int | None = None) -> Flask:
         )
 
     @app.get("/api/export/backup")
+    @require_login
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
     def api_export_backup():
         connection = sqlite3.connect(db_path)
         user_id = get_or_create_founder_user(connection)
@@ -1540,6 +1894,7 @@ def create_app(port: int | None = None) -> Flask:
         return send_file(memory, mimetype="application/zip", as_attachment=True, download_name="flowform_full_backup.zip")
 
     @app.get("/api/export/plan_pdf/<int:plan_id>")
+    @require_login
     def api_export_plan_pdf(plan_id: int):
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1573,6 +1928,7 @@ def create_app(port: int | None = None) -> Flask:
         return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_plan_{plan_id}.pdf")
 
     @app.get("/api/export/session_summary/<int:completion_id>")
+    @require_login
     def api_export_session_summary_pdf(completion_id: int):
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1607,6 +1963,7 @@ def create_app(port: int | None = None) -> Flask:
         return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_session_{completion_id}.pdf")
 
     @app.post("/api/import/backup")
+    @require_login
     def api_import_backup():
         upload = request.files.get("file")
         if upload is None or not upload.filename:
@@ -1715,6 +2072,12 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
             {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
             {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
+            {"path": "/login", "methods": ["GET", "POST"], "description": "User login"},
+            {"path": "/signup", "methods": ["GET", "POST"], "description": "User signup"},
+            {"path": "/logout", "methods": ["GET"], "description": "User logout"},
+            {"path": "/settings/profile", "methods": ["GET", "POST"], "description": "User profile settings"},
+            {"path": "/admin", "methods": ["GET"], "description": "Admin dashboard"},
+            {"path": "/api/billing/checkout", "methods": ["GET"], "description": "Payment provider stub"},
             {"path": "/exports", "methods": ["GET"], "description": "Exports page"},
             {"path": "/restore", "methods": ["GET"], "description": "Backup restore page"},
             {"path": "/templates", "methods": ["GET"], "description": "Session template catalog"},
@@ -1744,6 +2107,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/api/export/session_summary/<completion_id>", "methods": ["GET"], "description": "Download session summary PDF"},
             {"path": "/api/import", "methods": ["POST"], "description": "Import project"},
             {"path": "/api/import/backup", "methods": ["POST"], "description": "Restore full-fidelity backup ZIP"},
+            {"path": "/admin/users/<user_id>/toggle", "methods": ["POST"], "description": "Enable/disable user account"},
             {"path": "/api/projects/<code>", "methods": ["GET"], "description": "Fetch project by code"},
             {"path": "/api/agents/enhance", "methods": ["POST"], "description": "Enhance via agent"},
         ]
@@ -1775,6 +2139,11 @@ def create_app(port: int | None = None) -> Flask:
             "/plan/current",
             "/recovery",
             "/analytics",
+            "/login",
+            "/signup",
+            "/logout",
+            "/settings/profile",
+            "/admin",
             "/exports",
             "/restore",
             "/templates",

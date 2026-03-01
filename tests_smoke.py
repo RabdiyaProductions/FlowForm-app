@@ -427,6 +427,100 @@ def test_pdf_exports_for_plan_and_session(tmp_path, monkeypatch):
     assert session_pdf.data.startswith(b'%PDF')
 
 
+def test_auth_two_users_have_isolated_plans(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'auth.db'))
+    monkeypatch.setenv('ENABLE_AUTH', 'true')
+    app = create_app(port=5427)
+    client = app.test_client()
+
+    signup_a = client.post('/signup', data={
+        'display_name': 'User A',
+        'email': 'a@example.com',
+        'password': 'pass1234',
+    })
+    assert signup_a.status_code in (302, 303)
+    create_a = client.post('/api/plan/create', json={
+        'goal': 'strength',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'mobility', 'recovery', 'cardio', 'conditioning'],
+    })
+    assert create_a.status_code == 200
+    client.get('/logout')
+
+    signup_b = client.post('/signup', data={
+        'display_name': 'User B',
+        'email': 'b@example.com',
+        'password': 'pass5678',
+    })
+    assert signup_b.status_code in (302, 303)
+    create_b = client.post('/api/plan/create', json={
+        'goal': 'mobility',
+        'days_per_week': 2,
+        'minutes_per_session': 30,
+        'disciplines': ['mobility', 'recovery', 'strength', 'cardio', 'conditioning'],
+    })
+    assert create_b.status_code == 200
+    page_b = client.get('/plan/current')
+    assert b'Mobility 4-Week Plan' in page_b.data
+    client.get('/logout')
+
+    login_a = client.post('/login', data={'email': 'a@example.com', 'password': 'pass1234'})
+    assert login_a.status_code in (302, 303)
+    page_a = client.get('/plan/current')
+    assert b'Strength 4-Week Plan' in page_a.data
+    assert b'Mobility 4-Week Plan' not in page_a.data
+
+
+def test_free_tier_blocks_second_active_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'gating.db'))
+    monkeypatch.setenv('ENABLE_AUTH', 'true')
+    app = create_app(port=5428)
+    client = app.test_client()
+
+    client.post('/signup', data={
+        'display_name': 'Free User',
+        'email': 'free@example.com',
+        'password': 'pass1111',
+    })
+
+    first = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert first.status_code == 200
+
+    second = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert second.status_code == 403
+    payload = second.get_json()
+    assert payload['error'] == 'free_tier_limit_reached'
+    assert payload['pay_now_link'] is None
+
+
+def test_single_user_mode_when_auth_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'single-user.db'))
+    monkeypatch.setenv('ENABLE_AUTH', 'false')
+    app = create_app(port=5429)
+    client = app.test_client()
+
+    wizard = client.get('/plan/wizard')
+    assert wizard.status_code == 200
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+
 def test_ready_shows_counts_and_links(tmp_path, monkeypatch):
     monkeypatch.setenv('DB_PATH', str(tmp_path / 'ready.db'))
     app = create_app(port=5416)

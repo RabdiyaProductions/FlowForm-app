@@ -118,6 +118,32 @@ Behavior:
 #### Existing JSON export remains
 - `GET /api/export/json` still returns full JSON backup for programmatic use.
 
+---
+
+### 6) Auth + multi-profile scaffolding (toggleable)
+- Feature flag: set `ENABLE_AUTH=false` in `.env` to disable auth and keep single-founder mode behavior.
+- Minimal auth routes:
+  - `GET/POST /signup`
+  - `GET/POST /login`
+  - `GET /logout`
+- Profile route: `GET/POST /settings/profile` for updating name + goal/preferences.
+- Data model additions:
+  - `users` now supports `email`, `password_hash`, `role`, `enabled`, `created_at`.
+  - `subscriptions` stores `user_id`, `plan`, `status`, `start_date`, `end_date`.
+
+### 7) Subscription gating + admin tooling
+- Free tier gating:
+  - max 1 non-archived plan,
+  - template catalog limited to first 3 templates.
+- Paid tier unlocks:
+  - unlimited plans,
+  - priority support,
+  - early AI feature access.
+- Billing integration stub: `GET /api/billing/checkout` returns provider metadata and `pay_now_link: null` (intentionally unimplemented for safety).
+- Internal admin dashboard:
+  - `GET /admin` shows users + subscription status,
+  - `POST /admin/users/<user_id>/toggle` enables/disables accounts.
+
 
 ---
 
