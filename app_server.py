@@ -38,6 +38,15 @@ GOAL_DEFAULTS = {
     "hybrid": ["strength", "cardio", "mobility", "conditioning", "recovery"],
 }
 
+DISCIPLINES = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance"]
+GOAL_DEFAULTS = {
+    "strength": ["strength", "mobility", "recovery", "conditioning", "cardio"],
+    "fat_loss": ["conditioning", "cardio", "strength", "mobility", "recovery"],
+    "mobility": ["mobility", "recovery", "strength", "cardio", "conditioning"],
+    "stress": ["recovery", "mobility", "cardio", "strength", "conditioning"],
+    "hybrid": ["strength", "cardio", "mobility", "conditioning", "recovery"],
+}
+
 
 def load_env_file(env_path: Path) -> None:
     if not env_path.exists():
@@ -426,6 +435,7 @@ def preferred_disciplines(payload: dict) -> list[str]:
 
 
 def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int, limit_templates: int | None = None) -> list[dict]:
+def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int) -> list[dict]:
     rows = connection.execute(
         """
         SELECT id, name, discipline, duration_minutes, level
@@ -960,6 +970,19 @@ def create_app(port: int | None = None) -> Flask:
             app.logger.warning("SQLite init degraded: %s", exc)
             return {"ok": False, "message": f"SQLite init degraded: {exc}"}
 
+    def init_db_safely() -> dict:
+        try:
+            connection = sqlite3.connect(db_path)
+            apply_schema_migrations(connection)
+            get_or_create_founder_user(connection)
+            seed_templates(connection)
+            connection.commit()
+            connection.close()
+            return {"ok": True, "message": "db_ready"}
+        except sqlite3.Error as exc:
+            app.logger.warning("SQLite init degraded: %s", exc)
+            return {"ok": False, "message": f"SQLite init degraded: {exc}"}
+
     app.config["FIRST_CHECK"] = init_db_safely()
 
     @app.errorhandler(404)
@@ -1138,6 +1161,7 @@ def create_app(port: int | None = None) -> Flask:
                         "benefits": ["unlimited_plans", "priority_support", "early_access_ai"],
                         "pay_now_link": None,
                     }), 403
+            user_id = get_or_create_founder_user(connection)
 
             profile_row = connection.execute(
                 "SELECT id FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
@@ -1177,6 +1201,7 @@ def create_app(port: int | None = None) -> Flask:
             plan_id = int(cursor.lastrowid)
 
             pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session, None if is_paid else 3)
+            pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session)
             if not pool:
                 raise sqlite3.IntegrityError("session_template empty; cannot generate plan")
             items = build_plan_structure(pool, ordered_disciplines, days_per_week, minutes_per_session, weeks=4)
@@ -1223,6 +1248,7 @@ def create_app(port: int | None = None) -> Flask:
         now = utc_now_iso()
         try:
             user_id = current_user_id(connection)
+            user_id = get_or_create_founder_user(connection)
             row = current_plan_record(connection, user_id)
             if row is None:
                 raise sqlite3.IntegrityError("No plan found")
@@ -1309,6 +1335,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def recovery():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         rows = connection.execute(
             """
             SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
@@ -1356,6 +1386,7 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         try:
             user_id = current_user_id(connection)
+            user_id = get_or_create_founder_user(connection)
             existing = connection.execute(
                 "SELECT id FROM recovery_checkin WHERE user_id = ? AND date = ?",
                 (user_id, checkin_date),
@@ -1395,6 +1426,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def plan_current():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         plan = current_plan_record(connection, user_id)
         if plan is None:
             connection.close()
@@ -1410,6 +1445,10 @@ def create_app(port: int | None = None) -> Flask:
             LEFT JOIN session_completion sc ON sc.plan_day_id = pd.id
             WHERE pd.plan_id = ?
             GROUP BY pd.id, pd.week, pd.day_index, pd.title, st.name, st.discipline, st.duration_minutes
+            SELECT pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
             ORDER BY pd.week ASC, pd.day_index ASC
             """,
             (int(plan["id"]),),
@@ -1502,6 +1541,14 @@ def create_app(port: int | None = None) -> Flask:
             FROM session_template
             ORDER BY discipline ASC, duration_minutes ASC, id ASC
             {limit_clause}
+    def templates_catalog():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
             """
         ).fetchall()
         connection.close()
@@ -1513,6 +1560,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def analytics():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         data = analytics_snapshot(connection, user_id)
         connection.close()
         return render_template("analytics.html", analytics=data)
@@ -1619,6 +1670,7 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/session/start/<int:plan_day_id>")
     @require_login
+    @app.get("/session/start/<int:plan_day_id>")
     def session_start(plan_day_id: int):
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1714,6 +1766,8 @@ def create_app(port: int | None = None) -> Flask:
 
         return render_template("session_summary.html", completion=row)
 
+        )
+
     @app.post("/api/timeline/update")
     def api_timeline_update():
         return jsonify({"ok": True, "route": "/api/timeline/update"})
@@ -1749,6 +1803,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_plan():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         connection.close()
 
@@ -1763,6 +1820,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_json():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         connection.close()
 
@@ -1776,6 +1836,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_zip():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_zip():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         connection.close()
 
@@ -1802,6 +1865,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_backup():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         manifest = backup_manifest(connection)
         connection.close()
@@ -2088,6 +2154,10 @@ def create_app(port: int | None = None) -> Flask:
             "/api/export/plan_pdf/<plan_id>",
             "/api/export/session_summary/<completion_id>",
             "/api/import/backup",
+            "/api/recovery/checkin",
+            "/api/export/plan",
+            "/api/export/json",
+            "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",
             "/ready",
@@ -2136,6 +2206,7 @@ def create_app(port: int | None = None) -> Flask:
         }
         connection.close()
         return render_template("ready.html", counts=counts)
+        return render_template("ready.html")
 
     return app
 
