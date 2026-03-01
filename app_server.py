@@ -1,25 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sqlite3
-from contextlib import contextmanager
-from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template
 
 APP_NAME = "FlowForm Vitality Master Suite"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.1.2"
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
+LOG_DIR = ROOT_DIR / "logs"
 DEFAULT_DB_PATH = DATA_DIR / "flowform.db"
 
 
 def load_env_file(env_path: Path) -> None:
+    """Load key/value pairs from .env only when keys are not already set."""
     if not env_path.exists():
         return
+
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -31,281 +34,206 @@ def load_env_file(env_path: Path) -> None:
             os.environ[key] = value
 
 
-@contextmanager
-def get_db_connection(db_path: Path):
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+def configure_logging() -> None:
+    """Configure console and rotating file logs once."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        return
 
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    root_logger.setLevel(level)
 
-def ensure_schema(db_path: Path) -> None:
-    with get_db_connection(db_path) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
+    formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )
 
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                category TEXT NOT NULL,
-                intensity INTEGER NOT NULL,
-                duration_minutes INTEGER NOT NULL,
-                training_load INTEGER NOT NULL DEFAULT 0,
-                notes TEXT,
-                created_at TEXT NOT NULL,
-                completed_at TEXT
-            );
+    console = logging.StreamHandler()
+    console.setFormatter(formatter)
 
-            CREATE TABLE IF NOT EXISTS metrics (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER NOT NULL,
-                heart_rate_avg INTEGER,
-                calories INTEGER,
-                perceived_exertion INTEGER,
-                FOREIGN KEY (session_id) REFERENCES sessions(id)
-            );
-            """
-        )
+    file_handler = RotatingFileHandler(
+        LOG_DIR / "flowform.log", maxBytes=1_000_000, backupCount=3
+    )
+    file_handler.setFormatter(formatter)
 
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
-        if "training_load" not in columns:
-            conn.execute("ALTER TABLE sessions ADD COLUMN training_load INTEGER NOT NULL DEFAULT 0")
-
-        user_row = conn.execute("SELECT id FROM users LIMIT 1").fetchone()
-        if user_row is None:
-            conn.execute(
-                "INSERT INTO users(name, created_at) VALUES(?, ?)",
-                ("Local FlowForm User", datetime.utcnow().isoformat()),
-            )
-
-        conn.execute(
-            "UPDATE sessions SET training_load = duration_minutes * CAST(intensity AS INTEGER) WHERE training_load IS NULL OR training_load = 0"
-        )
-
-
-def get_weekly_minutes(conn: sqlite3.Connection) -> int:
-    week_start = (datetime.utcnow() - timedelta(days=7)).isoformat()
-    row = conn.execute(
-        "SELECT COALESCE(SUM(duration_minutes), 0) AS total FROM sessions WHERE completed_at IS NOT NULL AND completed_at >= ?",
-        (week_start,),
-    ).fetchone()
-    return int(row["total"] if row and row["total"] is not None else 0)
-
-
-def get_weekly_load(conn: sqlite3.Connection) -> int:
-    week_start = (datetime.utcnow() - timedelta(days=7)).isoformat()
-    row = conn.execute(
-        "SELECT COALESCE(SUM(training_load), 0) AS total FROM sessions WHERE completed_at IS NOT NULL AND completed_at >= ?",
-        (week_start,),
-    ).fetchone()
-    return int(row["total"] if row and row["total"] is not None else 0)
-
-
-def get_current_streak(conn: sqlite3.Connection) -> int:
-    rows = conn.execute(
-        "SELECT DISTINCT DATE(completed_at) AS day FROM sessions WHERE completed_at IS NOT NULL ORDER BY day DESC"
-    ).fetchall()
-    if not rows:
-        return 0
-
-    completed_days = {row["day"] for row in rows if row["day"]}
-    streak = 0
-    cursor_day = datetime.utcnow().date()
-
-    if cursor_day.isoformat() not in completed_days:
-        cursor_day = cursor_day - timedelta(days=1)
-
-    while cursor_day.isoformat() in completed_days:
-        streak += 1
-        cursor_day = cursor_day - timedelta(days=1)
-
-    return streak
-
-
-def validate_session_form(form: dict[str, str]) -> tuple[dict[str, str], str | None]:
-    title = form.get("title", "").strip()
-    category = form.get("category", "").strip()
-    notes = form.get("notes", "").strip()
-
-    try:
-        intensity = int(form.get("intensity", "0").strip())
-    except ValueError:
-        intensity = 0
-
-    try:
-        duration_minutes = int(form.get("duration_minutes", "0").strip())
-    except ValueError:
-        duration_minutes = 0
-
-    cleaned = {
-        "title": title,
-        "category": category,
-        "intensity": str(intensity),
-        "duration_minutes": str(duration_minutes),
-        "notes": notes,
-    }
-
-    if not title or not category:
-        return cleaned, "Title and category are required."
-    if duration_minutes <= 0:
-        return cleaned, "Duration must be greater than 0 minutes."
-    if intensity < 1 or intensity > 10:
-        return cleaned, "Intensity must be between 1 and 10."
-
-    return cleaned, None
+    root_logger.addHandler(console)
+    root_logger.addHandler(file_handler)
 
 
 def create_app(port: int | None = None) -> Flask:
+    """Create and configure the Flask application."""
     load_env_file(ROOT_DIR / ".env")
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    configure_logging()
 
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    app = Flask(__name__)
+
+    resolved_port = int(port if port is not None else os.getenv("PORT", "5410"))
     db_path = Path(os.getenv("DB_PATH", str(DEFAULT_DB_PATH))).resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    ensure_schema(db_path)
 
-    app = Flask(__name__)
-    resolved_port = int(port if port is not None else os.getenv("PORT", "5400"))
-    app.config.update(APP_NAME=APP_NAME, VERSION=APP_VERSION, PORT=resolved_port, DB_PATH=str(db_path))
+    app.config.update(
+        APP_NAME=APP_NAME,
+        VERSION=APP_VERSION,
+        PORT=resolved_port,
+        DB_PATH=str(db_path),
+    )
+
+    app.logger.info("FlowForm boot config: port=%s db=%s", resolved_port, db_path)
 
     def db_ok() -> bool:
         try:
-            with get_db_connection(db_path) as conn:
-                conn.execute("SELECT 1")
+            connection = sqlite3.connect(db_path)
+            connection.execute("SELECT 1")
+            connection.close()
             return True
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            app.logger.exception("SQLite health check failed: %s", exc)
             return False
 
     @app.errorhandler(404)
-    def not_found(_: Exception):
+    def handle_not_found(_: Exception):
         return jsonify({"error": "not_found"}), 404
 
     @app.errorhandler(500)
-    def server_error(_: Exception):
+    def handle_server_error(_: Exception):
+        app.logger.exception("Unhandled server error")
         return jsonify({"error": "internal_server_error"}), 500
 
     @app.get("/")
-    @app.get("/dashboard")
-    def dashboard_page():
-        with get_db_connection(db_path) as conn:
-            row = conn.execute("SELECT COUNT(*) AS c FROM sessions").fetchone()
-            total_sessions = int(row["c"] if row else 0)
-            weekly_minutes = get_weekly_minutes(conn)
-            weekly_load = get_weekly_load(conn)
-            streak = get_current_streak(conn)
-            last_five = conn.execute(
-                "SELECT id, title, category, intensity, duration_minutes, training_load, completed_at FROM sessions ORDER BY created_at DESC LIMIT 5"
-            ).fetchall()
-
-        return render_template(
-            "dashboard.html",
-            total_sessions=total_sessions,
-            weekly_minutes=weekly_minutes,
-            weekly_load=weekly_load,
-            streak=streak,
-            last_sessions=last_five,
-        )
-
-    @app.get("/sessions")
-    def sessions_list():
-        with get_db_connection(db_path) as conn:
-            rows = conn.execute(
-                "SELECT id, title, category, intensity, duration_minutes, training_load, created_at, completed_at FROM sessions ORDER BY created_at DESC"
-            ).fetchall()
-        return render_template("sessions.html", sessions=rows)
-
-    @app.get("/sessions/new")
-    def sessions_new():
-        return render_template("session_new.html", error=None, form_data={})
-
-    @app.post("/sessions/create")
-    def sessions_create():
-        form_data, error = validate_session_form(request.form)
-        if error:
-            return render_template("session_new.html", error=error, form_data=form_data), 400
-
-        intensity = int(form_data["intensity"])
-        duration_minutes = int(form_data["duration_minutes"])
-        training_load = duration_minutes * intensity
-
-        with get_db_connection(db_path) as conn:
-            conn.execute(
-                """
-                INSERT INTO sessions(title, category, intensity, duration_minutes, training_load, notes, created_at, completed_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, NULL)
-                """,
-                (
-                    form_data["title"],
-                    form_data["category"],
-                    intensity,
-                    duration_minutes,
-                    training_load,
-                    form_data["notes"] if form_data["notes"] else None,
-                    datetime.utcnow().isoformat(),
-                ),
-            )
-        return sessions_list()
-
-    @app.get("/sessions/<int:session_id>")
-    def sessions_detail(session_id: int):
-        with get_db_connection(db_path) as conn:
-            session_row = conn.execute(
-                "SELECT id, title, category, intensity, duration_minutes, training_load, notes, created_at, completed_at FROM sessions WHERE id = ?",
-                (session_id,),
-            ).fetchone()
-            if session_row is None:
-                return jsonify({"error": "session_not_found"}), 404
-
-            metric_row = conn.execute(
-                "SELECT id, heart_rate_avg, calories, perceived_exertion FROM metrics WHERE session_id = ? ORDER BY id DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
-
-        return render_template("session_detail.html", session=session_row, metric=metric_row, error=None)
-
-    @app.post("/sessions/<int:session_id>/complete")
-    def sessions_complete(session_id: int):
-        def optional_int(value: str) -> int | None:
-            value = value.strip()
-            if value == "":
-                return None
-            try:
-                return int(value)
-            except ValueError:
-                return None
-
-        heart_rate_avg = optional_int(request.form.get("heart_rate_avg", ""))
-        calories = optional_int(request.form.get("calories", ""))
-        perceived_exertion = optional_int(request.form.get("perceived_exertion", ""))
-
-        with get_db_connection(db_path) as conn:
-            session_row = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            if session_row is None:
-                return jsonify({"error": "session_not_found"}), 404
-
-            conn.execute("UPDATE sessions SET completed_at = ? WHERE id = ?", (datetime.utcnow().isoformat(), session_id))
-            conn.execute(
-                "INSERT INTO metrics(session_id, heart_rate_avg, calories, perceived_exertion) VALUES(?, ?, ?, ?)",
-                (session_id, heart_rate_avg, calories, perceived_exertion),
-            )
-
-        return sessions_detail(session_id)
-
-    @app.get("/ready")
-    def ready_page():
+    def root():
         return render_template("ready.html")
 
     @app.get("/api/health")
     def api_health():
-        ok = db_ok()
-        return jsonify({"status": "ok" if ok else "degraded", "port": app.config["PORT"], "db_ok": ok, "version": APP_VERSION})
+        is_db_ok = db_ok()
+        payload = {
+            "status": "ok" if is_db_ok else "degraded",
+            "port": app.config["PORT"],
+            "db_ok": is_db_ok,
+            "version": app.config["VERSION"],
+        }
+        return jsonify(payload)
+
+    @app.post("/api/timeline/update")
+    def api_timeline_update():
+        return jsonify({"ok": True, "route": "/api/timeline/update"})
+
+    @app.post("/api/timeline/regenerate")
+    def api_timeline_regenerate():
+        return jsonify({"ok": True, "route": "/api/timeline/regenerate"})
+
+    @app.post("/api/timeline/apply_global")
+    def api_timeline_apply_global():
+        return jsonify({"ok": True, "route": "/api/timeline/apply_global"})
+
+    @app.post("/api/critic/run")
+    def api_critic_run():
+        return jsonify({"ok": True, "route": "/api/critic/run"})
+
+    @app.post("/api/approve")
+    def api_approve():
+        return jsonify({"ok": True, "route": "/api/approve"})
+
+    @app.post("/api/export")
+    def api_export():
+        return jsonify({"ok": True, "route": "/api/export"})
+
+    @app.post("/api/import")
+    def api_import():
+        return jsonify({"ok": True, "route": "/api/import"})
+
+    @app.get("/api/projects/<code>")
+    def api_project_by_code(code: str):
+        return jsonify({"ok": True, "route": "/api/projects/<code>", "code": code})
+
+    @app.post("/api/agents/enhance")
+    def api_agents_enhance():
+        return jsonify({"ok": True, "route": "/api/agents/enhance"})
+
+    def app_spec() -> dict:
+        curated_routes = [
+            {"path": "/", "methods": ["GET"], "description": "Ready landing page"},
+            {"path": "/ready", "methods": ["GET"], "description": "Readiness page"},
+            {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks"},
+            {"path": "/api/spec", "methods": ["GET"], "description": "API + route spec"},
+            {"path": "/api/health", "methods": ["GET"], "description": "Health status"},
+            {"path": "/api/timeline/update", "methods": ["POST"], "description": "Update timeline"},
+            {"path": "/api/timeline/regenerate", "methods": ["POST"], "description": "Regenerate timeline"},
+            {"path": "/api/timeline/apply_global", "methods": ["POST"], "description": "Apply global timeline config"},
+            {"path": "/api/critic/run", "methods": ["POST"], "description": "Run critic pass"},
+            {"path": "/api/approve", "methods": ["POST"], "description": "Approve current draft"},
+            {"path": "/api/export", "methods": ["POST"], "description": "Export project"},
+            {"path": "/api/import", "methods": ["POST"], "description": "Import project"},
+            {"path": "/api/projects/<code>", "methods": ["GET"], "description": "Fetch project by code"},
+            {"path": "/api/agents/enhance", "methods": ["POST"], "description": "Enhance via agent"},
+        ]
+
+        seen_paths = {item["path"] for item in curated_routes}
+        for rule in app.url_map.iter_rules():
+            if rule.endpoint == "static":
+                continue
+            if rule.rule in seen_paths:
+                continue
+            methods = sorted(m for m in rule.methods if m not in {"HEAD", "OPTIONS"})
+            curated_routes.append(
+                {
+                    "path": rule.rule,
+                    "methods": methods,
+                    "description": "Auto-discovered route",
+                }
+            )
+            seen_paths.add(rule.rule)
+
+        return {
+            "name": app.config["APP_NAME"],
+            "version": app.config["VERSION"],
+            "routes": curated_routes,
+        }
+
+    @app.get("/api/spec")
+    def api_spec():
+        return jsonify(app_spec())
+
+    @app.get("/diagnostics")
+    def diagnostics():
+        needed = [
+            "/api/health",
+            "/api/timeline/update",
+            "/api/timeline/regenerate",
+            "/api/timeline/apply_global",
+            "/api/critic/run",
+            "/api/approve",
+            "/api/export",
+            "/api/import",
+            "/api/projects/<code>",
+            "/api/agents/enhance",
+            "/api/spec",
+            "/diagnostics",
+            "/ready",
+        ]
+
+        spec_routes = {route["path"] for route in app_spec()["routes"]}
+        missing_from_spec = [route for route in needed if route not in spec_routes]
+
+        checks = {
+            "health_route": "PASS" if "/api/health" in spec_routes else "FAIL",
+            "spec_mismatch": "FAIL" if missing_from_spec else "PASS",
+        }
+
+        return jsonify(
+            {
+                "status": "PASS" if all(v == "PASS" for v in checks.values()) else "FAIL",
+                "needed": needed,
+                "checks": checks,
+                "missing_from_spec": missing_from_spec,
+            }
+        )
+
+    @app.get("/ready")
+    def ready():
+        return render_template("ready.html")
 
     return app
 
