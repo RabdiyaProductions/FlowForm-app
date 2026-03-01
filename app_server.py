@@ -6,7 +6,7 @@ import logging
 import os
 import sqlite3
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -517,6 +517,123 @@ def suggestion_for_low_readiness(connection: sqlite3.Connection, minutes: int | 
     return {"id": int(row[0]), "name": row[1], "discipline": row[2], "duration_minutes": int(row[3])}
 
 
+
+def analytics_snapshot(connection: sqlite3.Connection, user_id: int) -> dict:
+    # Distinct completion dates for streak math.
+    completion_dates = [
+        row[0]
+        for row in connection.execute(
+            """
+            SELECT DISTINCT DATE(completed_at) AS day
+            FROM session_completion
+            ORDER BY day DESC
+            """
+        ).fetchall()
+        if row[0]
+    ]
+
+    streak = 0
+    if completion_dates:
+        today = date.today()
+        date_set = {date.fromisoformat(item) for item in completion_dates}
+        cursor = today
+        while cursor in date_set:
+            streak += 1
+            cursor -= timedelta(days=1)
+
+    # Weekly completion rate for current week of active plan.
+    plan = current_plan_record(connection, user_id)
+    weekly_completion_rate = 0
+    if plan is not None and plan["start_date"]:
+        start = date.fromisoformat(plan["start_date"])
+        elapsed = max(0, (date.today() - start).days)
+        current_week = min(int(plan["weeks"]), (elapsed // 7) + 1)
+
+        totals = connection.execute(
+            "SELECT COUNT(*) FROM plan_day WHERE plan_id = ? AND week = ?",
+            (int(plan["id"]), current_week),
+        ).fetchone()[0]
+        completed = connection.execute(
+            """
+            SELECT COUNT(DISTINCT pd.id)
+            FROM plan_day pd
+            JOIN session_completion sc ON sc.plan_day_id = pd.id
+            WHERE pd.plan_id = ? AND pd.week = ?
+            """,
+            (int(plan["id"]), current_week),
+        ).fetchone()[0]
+        if totals > 0:
+            weekly_completion_rate = int(round((completed / totals) * 100))
+
+    avg_rpe = {}
+    for days in (7, 14, 30):
+        row = connection.execute(
+            """
+            SELECT AVG(rpe)
+            FROM session_completion
+            WHERE completed_at >= datetime('now', ?)
+            """,
+            (f"-{days} days",),
+        ).fetchone()
+        avg_rpe[str(days)] = round(float(row[0]), 2) if row and row[0] is not None else None
+
+    readiness_rows = connection.execute(
+        """
+        SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10
+        FROM recovery_checkin
+        WHERE user_id = ?
+        ORDER BY date DESC
+        LIMIT 14
+        """,
+        (user_id,),
+    ).fetchall()
+
+    readiness_trend = []
+    for row in reversed(readiness_rows):
+        score, _ = compute_readiness_score(
+            float(row[1] or 0),
+            int(row[2] or 5),
+            int(row[3] or 5),
+            int(row[4] or 5),
+        )
+        readiness_trend.append({"date": row[0], "score": score})
+
+    # Card takeaways
+    streak_takeaway = "Excellent momentum — keep the chain alive today." if streak >= 3 else "Start or restart the streak with one focused session today."
+    weekly_takeaway = (
+        "On track this week — maintain your rhythm." if weekly_completion_rate >= 70
+        else "Below target this week — schedule one catch-up session."
+    )
+
+    rpe_7 = avg_rpe.get("7")
+    if rpe_7 is None:
+        rpe_takeaway = "No recent RPE data yet — finish a session to start insights."
+    elif rpe_7 >= 8:
+        rpe_takeaway = "Recent effort is high — consider extra recovery emphasis."
+    elif rpe_7 <= 5:
+        rpe_takeaway = "Recent effort is moderate/low — safe room to push when ready."
+    else:
+        rpe_takeaway = "Recent effort is balanced — keep progressive overload steady."
+
+    if readiness_trend:
+        latest = readiness_trend[-1]["score"]
+        readiness_takeaway = "Recovery trend is low — choose a lighter session suggestion today." if latest < 55 else "Recovery trend is supportive — proceed with planned intensity."
+    else:
+        readiness_takeaway = "No readiness trend yet — add daily recovery check-ins."
+
+    return {
+        "streak": streak,
+        "weekly_completion_rate": weekly_completion_rate,
+        "avg_rpe": avg_rpe,
+        "readiness_trend": readiness_trend,
+        "takeaways": {
+            "streak": streak_takeaway,
+            "weekly": weekly_takeaway,
+            "rpe": rpe_takeaway,
+            "readiness": readiness_takeaway,
+        },
+    }
+
 def create_app(port: int | None = None) -> Flask:
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
@@ -981,6 +1098,15 @@ def create_app(port: int | None = None) -> Flask:
             suggestion=suggestion,
         )
 
+    @app.get("/analytics")
+    def analytics():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
+        data = analytics_snapshot(connection, user_id)
+        connection.close()
+        return render_template("analytics.html", analytics=data)
+
     @app.get("/session/start/<int:plan_day_id>")
     def session_start(plan_day_id: int):
         connection = sqlite3.connect(db_path)
@@ -1118,6 +1244,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/plan/wizard", "methods": ["GET"], "description": "Plan creation wizard"},
             {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
             {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
+            {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
             {"path": "/api/recovery/checkin", "methods": ["POST"], "description": "Persist daily recovery check-in"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
@@ -1167,6 +1294,7 @@ def create_app(port: int | None = None) -> Flask:
             "/plan/wizard",
             "/plan/current",
             "/recovery",
+            "/analytics",
             "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",
