@@ -1,46 +1,72 @@
 # FEATURE_LEDGER
 
-## Scope and evidence
-This ledger is populated from files present in this repository snapshot.
+## Founder-critical plan flow (implemented)
 
-Evidence used:
-- `app_server.py` (implemented Flask routes)
-- `tools/run_full_tests.py` (regression workflow)
-- `_BAT/1_setup.bat`, `_BAT/2_run.bat`, `_BAT/3_open_browser.bat`, `_BAT/6_run_tests.bat` (boot/run/test flow)
-- `README.md`, `BASELINE.md` (operational documentation)
+### UI Route: `/plan/wizard` (GET)
+Purpose: collect founder planning inputs and submit plan creation.
 
-Requested source files not found in this repo snapshot:
-- `app.py` (missing; implementation lives in `app_server.py`)
-- `QUICKSTART.md` (missing)
-- `COMPLETION_MATRIX.md` (missing)
+Fields implemented:
+- goal (`strength`, `fat_loss`, `mobility`, `stress`, `hybrid`)
+- days/week (`2` to `6`)
+- minutes/session (`30` to `75`)
+- discipline preferences (rank 1–5)
+- constraints (injury flags, equipment, freeform constraints)
 
-Status key:
-- ✅ implemented and testable in current code
-- 🟨 partial/stubbed
-- ⬜ not implemented in current code
+Exact click steps:
+1. Open `/plan/wizard`.
+2. Fill the required fields.
+3. Click **Create 4-week plan**.
+4. App posts to `POST /api/plan/create` and redirects to `/plan/current`.
 
-## Route/feature ledger
+### API Route: `/api/plan/create` (POST)
+Purpose: generate and persist a 4-week plan.
 
-| Feature | UI entry point (page/button) | Endpoint(s) | Data store | Outputs / artifacts | Acceptance check (what I do, what must happen) | Status |
-|---|---|---|---|---|---|---|
-| API spec | API client / diagnostics tooling | `GET /api/spec` | In-memory route manifest built from Flask `app.url_map` | JSON with app/version/routes | Call `/api/spec`; must return 200 and include all implemented core routes | ✅ |
-| Diagnostics | Browser/API client to `/diagnostics` | `GET /diagnostics` | In-memory checks against API spec | JSON status/checks/missing routes | Call `/diagnostics`; must return `status=PASS` with no missing routes | ✅ |
-| App state (requested) | N/A in current UI | `/api/state` | N/A | N/A | Endpoint is requested but not present in app routes | ⬜ |
-| Orders (requested) | N/A in current UI | `/api/orders` | N/A | N/A | Endpoint is requested but not present in app routes | ⬜ |
-| Generate flow (requested) | N/A in current UI | `/api/generate/*` | N/A | N/A | Endpoint family is requested but not present in app routes | ⬜ |
-| Timeline APIs | No dedicated button in current ready UI | `POST /api/timeline/update`, `POST /api/timeline/regenerate`, `POST /api/timeline/apply_global` | No persisted write behavior currently | JSON ack payloads | POST each endpoint; must return 200 JSON ack | 🟨 |
-| Critic run | No dedicated button in current ready UI | `POST /api/critic/run` | No persisted write behavior currently | JSON ack payload | POST endpoint; must return 200 JSON ack | 🟨 |
-| Approve | No dedicated button in current ready UI | `POST /api/approve` | No persisted write behavior currently | JSON ack payload | POST endpoint; must return 200 JSON ack | 🟨 |
-| Export | No dedicated button in current ready UI | `POST /api/export`, `/exports` (requested route missing) | File artifact creation not yet implemented | Currently JSON ack only (no ZIP emitted yet) | POST `/api/export`; currently returns ack, but ZIP acceptance is not yet met | 🟨 |
-| Import | No dedicated button in current ready UI | `POST /api/import`, `/imports` (requested route missing) | File import persistence not yet implemented | Currently JSON ack only | POST `/api/import`; currently returns ack, route `/imports` is not implemented | 🟨 |
-| Project lookup helper | No dedicated button in current ready UI | `GET /api/projects/<code>` | No project DB query yet | JSON echo payload with code | GET endpoint with code; must return 200 and echo `code` | 🟨 |
-| Health + readiness | Browser to `/ready` | `GET /health`, `GET /api/health`, `GET /ready`, `GET /` | SQLite (`data/flowform.db`) with fail-safe init (non-blocking) | JSON health payload + ready page | Open `/health`; must include `status/version/time/db_ok/provider_status` | ✅ |
+Behavior implemented:
+- Validates/clamps days/week and minutes/session ranges.
+- Resolves ordered disciplines from ranked inputs + goal defaults.
+- Upserts founder profile preferences.
+- Archives existing active plan for same founder.
+- Creates new active 4-week plan.
+- Generates progressive week/day structure and inserts `plan_day` rows.
+- Writes `audit_log` event `plan_created`.
 
-## Core workflows (from available docs/code)
-1. **Boot path**: `_BAT/1_setup.bat` → `_BAT/2_run.bat` → validate `/diagnostics`.
-2. **Regression gate**: `_BAT/6_run_tests.bat` or `python tools/run_full_tests.py`.
-3. **Startup safety note**: No first-run integrity gate blocks startup; DB init is fail-safe and non-blocking.
-4. **Automated test sequence** (from `tools/run_full_tests.py`):
-   - `python -m pytest tests_smoke.py`
-   - `python -m pytest smoke_test.py`
-   - pass only if both commands exit 0.
+Persistence targets:
+- `profile`
+- `plan`
+- `plan_day`
+- `audit_log`
+
+### UI Route: `/plan/current` (GET)
+Purpose: display persisted current plan with calendar-style week/day rows.
+
+Implemented UI elements:
+- Week cards with day rows, discipline, and duration.
+- Today selector (`Week X, Day Y`) computed from plan start date.
+- CTA: **Start today's session**.
+- CTA: **Regenerate next week** (`POST /api/plan/regenerate-next-week`).
+
+Regeneration behavior:
+- Rebuilds next-week rows.
+- Does not delete rows that already have `session_completion` records.
+
+## Supporting schema (used by flow)
+- `users`
+- `profile`
+- `plan`
+- `plan_day`
+- `session_template`
+- `session_completion`
+- `recovery_checkin`
+- `audit_log`
+
+All tables are created via safe migration rules (`CREATE TABLE IF NOT EXISTS` + checked `ALTER`).
+
+## Health and diagnostics for this flow
+- `/api/health` includes:
+  - `db_ok`
+  - `template_count`
+- `/diagnostics` includes DB integrity checks and required route coverage for plan flow.
+
+## Boot/test compatibility
+- Existing boot scripts are unchanged.
+- Structure guard remains integrated in `_BAT/6_run_tests.bat` and `tools/run_full_tests.py`.

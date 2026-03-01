@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sqlite3
 import subprocess
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 APP_NAME = "FlowForm Vitality Master Suite"
 APP_VERSION = "0.1.3"
@@ -20,9 +21,17 @@ DATA_DIR = ROOT_DIR / "data"
 LOG_DIR = ROOT_DIR / "logs"
 DEFAULT_DB_PATH = DATA_DIR / "flowform.db"
 
+DISCIPLINES = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance"]
+GOAL_DEFAULTS = {
+    "strength": ["strength", "mobility", "recovery", "conditioning", "cardio"],
+    "fat_loss": ["conditioning", "cardio", "strength", "mobility", "recovery"],
+    "mobility": ["mobility", "recovery", "strength", "cardio", "conditioning"],
+    "stress": ["recovery", "mobility", "cardio", "strength", "conditioning"],
+    "hybrid": ["strength", "cardio", "mobility", "conditioning", "recovery"],
+}
+
 
 def load_env_file(env_path: Path) -> None:
-    """Load key/value pairs from .env only when keys are not already set."""
     if not env_path.exists():
         return
 
@@ -38,7 +47,6 @@ def load_env_file(env_path: Path) -> None:
 
 
 def configure_logging() -> None:
-    """Configure console and rotating file logs once."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     root_logger = logging.getLogger()
     if root_logger.handlers:
@@ -48,16 +56,12 @@ def configure_logging() -> None:
     level = getattr(logging, level_name, logging.INFO)
     root_logger.setLevel(level)
 
-    formatter = logging.Formatter(
-        "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-    )
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)
 
-    file_handler = RotatingFileHandler(
-        LOG_DIR / "flowform.log", maxBytes=1_000_000, backupCount=3
-    )
+    file_handler = RotatingFileHandler(LOG_DIR / "flowform.log", maxBytes=1_000_000, backupCount=3)
     file_handler.setFormatter(formatter)
 
     root_logger.addHandler(console)
@@ -71,11 +75,7 @@ def utc_now_iso() -> str:
 def git_hash() -> str:
     try:
         return (
-            subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(ROOT_DIR),
-                text=True,
-            )
+            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], cwd=str(ROOT_DIR), text=True)
             .strip()
         )
     except Exception:
@@ -86,8 +86,355 @@ def provider_status() -> str:
     return "configured" if os.getenv("PROVIDER_API_KEY") else "not_configured"
 
 
+def column_exists(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row[1] == column for row in rows)
+
+
+def ensure_column(connection: sqlite3.Connection, table: str, column: str, definition_sql: str) -> None:
+    if not column_exists(connection, table, column):
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {definition_sql}")
+
+
+def apply_schema_migrations(connection: sqlite3.Connection) -> None:
+    now = utc_now_iso()
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            email TEXT,
+            display_name TEXT
+        )
+        """
+    )
+    ensure_column(connection, "users", "created_at", "created_at TEXT NOT NULL DEFAULT ''")
+    ensure_column(connection, "users", "updated_at", "updated_at TEXT NOT NULL DEFAULT ''")
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS profile (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            goal TEXT,
+            days_per_week INTEGER,
+            minutes INTEGER,
+            equipment TEXT,
+            constraints TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            name TEXT NOT NULL,
+            start_date TEXT,
+            weeks INTEGER NOT NULL DEFAULT 4,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_template (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            discipline TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            level TEXT NOT NULL,
+            json_blocks TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS plan_day (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL,
+            week INTEGER NOT NULL,
+            day_index INTEGER NOT NULL,
+            template_id INTEGER,
+            title TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(plan_id) REFERENCES plan(id),
+            FOREIGN KEY(template_id) REFERENCES session_template(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS session_completion (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_day_id INTEGER NOT NULL,
+            completed_at TEXT NOT NULL,
+            rpe INTEGER,
+            notes TEXT,
+            minutes_done INTEGER,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(plan_day_id) REFERENCES plan_day(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS recovery_checkin (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            date TEXT NOT NULL,
+            sleep_hours REAL,
+            stress_1_10 INTEGER,
+            soreness_1_10 INTEGER,
+            mood_1_10 INTEGER,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS _healthcheck (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checked_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute("INSERT INTO _healthcheck(checked_at) VALUES (?)", (now,))
+
+
+def seed_templates(connection: sqlite3.Connection) -> None:
+    existing_count = connection.execute("SELECT COUNT(*) FROM session_template").fetchone()[0]
+    if existing_count > 0:
+        return
+
+    now = utc_now_iso()
+    templates = [
+        ("Strength Foundation A", "strength", 45, "beginner", '{"blocks":[{"name":"warmup","minutes":8},{"name":"compound_lifts","minutes":28},{"name":"cooldown","minutes":9}]}'),
+        ("Strength Progression B", "strength", 60, "intermediate", '{"blocks":[{"name":"warmup","minutes":10},{"name":"main_lifts","minutes":38},{"name":"accessory","minutes":8},{"name":"cooldown","minutes":4}]}'),
+        ("Zone 2 Base Ride", "cardio", 50, "beginner", '{"blocks":[{"name":"warmup","minutes":10},{"name":"steady_state","minutes":35},{"name":"cooldown","minutes":5}]}'),
+        ("Tempo Intervals Run", "cardio", 40, "intermediate", '{"blocks":[{"name":"warmup","minutes":8},{"name":"tempo_intervals","minutes":26},{"name":"cooldown","minutes":6}]}'),
+        ("Mobility Restore", "mobility", 30, "all_levels", '{"blocks":[{"name":"breath","minutes":5},{"name":"hips_spine","minutes":20},{"name":"reset","minutes":5}]}'),
+        ("Yoga Recovery Flow", "recovery", 35, "all_levels", '{"blocks":[{"name":"flow","minutes":25},{"name":"downregulate","minutes":10}]}'),
+        ("HIIT Power Ladder", "conditioning", 32, "advanced", '{"blocks":[{"name":"warmup","minutes":6},{"name":"ladder","minutes":20},{"name":"cooldown","minutes":6}]}'),
+        ("Endurance Long Session", "endurance", 75, "intermediate", '{"blocks":[{"name":"warmup","minutes":10},{"name":"steady_endurance","minutes":55},{"name":"cooldown","minutes":10}]}'),
+    ]
+
+    connection.executemany(
+        """
+        INSERT INTO session_template (name, discipline, duration_minutes, level, json_blocks, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [(name, discipline, duration, level, blocks, now, now) for name, discipline, duration, level, blocks in templates],
+    )
+
+
+def get_or_create_founder_user(connection: sqlite3.Connection) -> int:
+    row = connection.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+    if row:
+        return int(row[0])
+
+    now = utc_now_iso()
+    cursor = connection.execute(
+        """
+        INSERT INTO users (email, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        ("founder@flowform.local", "Founder", now, now),
+    )
+    return int(cursor.lastrowid)
+
+
+def db_integrity_snapshot(db_path: Path) -> dict:
+    required_tables = {
+        "users",
+        "profile",
+        "plan",
+        "plan_day",
+        "session_template",
+        "session_completion",
+        "recovery_checkin",
+        "audit_log",
+    }
+
+    try:
+        connection = sqlite3.connect(db_path)
+        existing_tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        missing_tables = sorted(required_tables - existing_tables)
+        template_count = connection.execute("SELECT COUNT(*) FROM session_template").fetchone()[0]
+        connection.execute("SELECT 1")
+        connection.close()
+
+        db_ok = not missing_tables and template_count > 0
+        return {"db_ok": db_ok, "template_count": int(template_count), "missing_tables": missing_tables}
+    except sqlite3.Error as exc:
+        return {
+            "db_ok": False,
+            "template_count": 0,
+            "missing_tables": sorted(required_tables),
+            "error": str(exc),
+        }
+
+
+def clamp_int(value: int, low: int, high: int) -> int:
+    return max(low, min(high, value))
+
+
+def preferred_disciplines(payload: dict) -> list[str]:
+    ranked = []
+    if payload.get("disciplines") and isinstance(payload.get("disciplines"), list):
+        ranked = [str(item).strip().lower() for item in payload["disciplines"] if str(item).strip()]
+    else:
+        ranked = [
+            str(payload.get(f"discipline_rank_{idx}", "")).strip().lower()
+            for idx in range(1, 6)
+            if str(payload.get(f"discipline_rank_{idx}", "")).strip()
+        ]
+
+    goal = str(payload.get("goal", "hybrid")).strip().lower().replace(" ", "_")
+    defaults = GOAL_DEFAULTS.get(goal, GOAL_DEFAULTS["hybrid"])
+
+    deduped = []
+    for item in ranked + defaults:
+        if item in DISCIPLINES and item not in deduped:
+            deduped.append(item)
+    return deduped or GOAL_DEFAULTS["hybrid"]
+
+
+def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int) -> list[dict]:
+    rows = connection.execute(
+        """
+        SELECT id, name, discipline, duration_minutes, level
+        FROM session_template
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    if not rows:
+        return []
+
+    priority = {discipline: idx for idx, discipline in enumerate(ordered_disciplines)}
+
+    mapped = [
+        {
+            "id": int(row[0]),
+            "name": row[1],
+            "discipline": row[2],
+            "duration": int(row[3]),
+            "level": row[4],
+        }
+        for row in rows
+    ]
+
+    mapped.sort(
+        key=lambda item: (
+            priority.get(item["discipline"], 999),
+            abs(item["duration"] - target_minutes),
+            item["id"],
+        )
+    )
+    return mapped
+
+
+def choose_template_for_day(pool: list[dict], discipline: str, target_minutes: int, offset: int) -> dict:
+    discipline_pool = [item for item in pool if item["discipline"] == discipline]
+    candidate_pool = discipline_pool if discipline_pool else pool
+    ranked = sorted(candidate_pool, key=lambda item: (abs(item["duration"] - target_minutes), item["id"]))
+    return ranked[offset % len(ranked)]
+
+
+def build_plan_structure(
+    pool: list[dict],
+    ordered_disciplines: list[str],
+    days_per_week: int,
+    minutes_per_session: int,
+    weeks: int,
+) -> list[dict]:
+    items: list[dict] = []
+    for week in range(1, weeks + 1):
+        # Progressive structure: weeks 1-3 build, week 4 deload.
+        if week <= 2:
+            target = minutes_per_session
+        elif week == 3:
+            target = clamp_int(minutes_per_session + 5, 30, 75)
+        else:
+            target = clamp_int(minutes_per_session - 5, 30, 75)
+
+        for day_index in range(1, days_per_week + 1):
+            discipline = ordered_disciplines[(day_index - 1) % len(ordered_disciplines)]
+            choice = choose_template_for_day(pool, discipline, target, offset=week + day_index)
+            items.append(
+                {
+                    "week": week,
+                    "day_index": day_index,
+                    "template_id": choice["id"],
+                    "title": f"Week {week} Day {day_index}: {choice['name']}",
+                }
+            )
+    return items
+
+
+def current_plan_record(connection: sqlite3.Connection, user_id: int) -> sqlite3.Row | None:
+    connection.row_factory = sqlite3.Row
+    row = connection.execute(
+        """
+        SELECT id, user_id, name, start_date, weeks, status
+        FROM plan
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+    return row
+
+
+def write_audit(connection: sqlite3.Connection, event: str, payload: dict) -> None:
+    now = utc_now_iso()
+    connection.execute(
+        """
+        INSERT INTO audit_log (event, payload_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (event, json.dumps(payload), now, now),
+    )
+
+
 def create_app(port: int | None = None) -> Flask:
-    """Create and configure the Flask application."""
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
 
@@ -105,33 +452,25 @@ def create_app(port: int | None = None) -> Flask:
         DB_PATH=str(db_path),
         BUILD_DATE=BUILD_DATE,
         GIT_HASH=git_hash(),
+        FIRST_CHECK={"ok": True, "message": ""},
     )
 
     app.logger.info("FlowForm boot config: port=%s db=%s", resolved_port, db_path)
 
-    def init_db_safely() -> None:
+    def init_db_safely() -> dict:
         try:
             connection = sqlite3.connect(db_path)
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS _healthcheck (id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL)"
-            )
-            connection.execute("INSERT INTO _healthcheck(checked_at) VALUES (?)", (utc_now_iso(),))
+            apply_schema_migrations(connection)
+            get_or_create_founder_user(connection)
+            seed_templates(connection)
             connection.commit()
             connection.close()
+            return {"ok": True, "message": "db_ready"}
         except sqlite3.Error as exc:
-            app.logger.warning("SQLite init skipped: %s", exc)
+            app.logger.warning("SQLite init degraded: %s", exc)
+            return {"ok": False, "message": f"SQLite init degraded: {exc}"}
 
-    def db_ok() -> bool:
-        try:
-            connection = sqlite3.connect(db_path)
-            connection.execute("SELECT 1")
-            connection.close()
-            return True
-        except sqlite3.Error as exc:
-            app.logger.exception("SQLite health check failed: %s", exc)
-            return False
-
-    init_db_safely()
+    app.config["FIRST_CHECK"] = init_db_safely()
 
     @app.errorhandler(404)
     def handle_not_found(_: Exception):
@@ -150,27 +489,31 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/health")
     def health():
-        is_db_ok = db_ok()
+        snapshot = db_integrity_snapshot(db_path)
         return jsonify(
             {
-                "status": "ok" if is_db_ok else "degraded",
+                "status": "ok" if snapshot["db_ok"] else "degraded",
                 "version": app.config["VERSION"],
                 "time": utc_now_iso(),
-                "db_ok": is_db_ok,
+                "db_ok": snapshot["db_ok"],
+                "template_count": snapshot["template_count"],
                 "provider_status": provider_status(),
             }
         )
 
     @app.get("/api/health")
     def api_health():
-        is_db_ok = db_ok() and app.config["FIRST_CHECK"]["ok"]
-        payload = {
-            "status": "ok" if is_db_ok else "degraded",
-            "port": app.config["PORT"],
-            "db_ok": is_db_ok,
-            "version": app.config["VERSION"],
-        }
-        return jsonify(payload)
+        snapshot = db_integrity_snapshot(db_path)
+        is_db_ok = snapshot["db_ok"] and app.config["FIRST_CHECK"]["ok"]
+        return jsonify(
+            {
+                "status": "ok" if is_db_ok else "degraded",
+                "port": app.config["PORT"],
+                "db_ok": is_db_ok,
+                "template_count": snapshot["template_count"],
+                "version": app.config["VERSION"],
+            }
+        )
 
     @app.get("/version")
     def version():
@@ -181,6 +524,245 @@ def create_app(port: int | None = None) -> Flask:
                 "build_date": app.config["BUILD_DATE"],
                 "git_hash": app.config["GIT_HASH"],
             }
+        )
+
+    @app.get("/plan/wizard")
+    def plan_wizard():
+        return render_template("plan_wizard.html", disciplines=DISCIPLINES)
+
+    @app.post("/api/plan/create")
+    def api_plan_create():
+        payload = request.get_json(silent=True) or request.form.to_dict()
+
+        goal_raw = str(payload.get("goal", "hybrid")).strip().lower().replace(" ", "_")
+        goal = goal_raw if goal_raw in GOAL_DEFAULTS else "hybrid"
+        days_per_week = clamp_int(int(payload.get("days_per_week", 4)), 2, 6)
+        minutes_per_session = clamp_int(int(payload.get("minutes_per_session", 50)), 30, 75)
+
+        ordered_disciplines = preferred_disciplines(payload)
+        injury_flags = str(payload.get("injury_flags", "")).strip()
+        equipment = str(payload.get("equipment", "")).strip()
+        extra_constraints = str(payload.get("constraints", "")).strip()
+        combined_constraints = "; ".join(part for part in [injury_flags, extra_constraints] if part)
+
+        now = utc_now_iso()
+        today = date.today().isoformat()
+
+        connection = sqlite3.connect(db_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        try:
+            user_id = get_or_create_founder_user(connection)
+
+            profile_row = connection.execute(
+                "SELECT id FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if profile_row:
+                connection.execute(
+                    """
+                    UPDATE profile
+                    SET goal = ?, days_per_week = ?, minutes = ?, equipment = ?, constraints = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (goal, days_per_week, minutes_per_session, equipment, combined_constraints, now, profile_row[0]),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO profile (user_id, goal, days_per_week, minutes, equipment, constraints, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, goal, days_per_week, minutes_per_session, equipment, combined_constraints, now, now),
+                )
+
+            connection.execute(
+                "UPDATE plan SET status = 'archived', updated_at = ? WHERE user_id = ? AND status = 'active'",
+                (now, user_id),
+            )
+
+            plan_name = f"{goal.replace('_', ' ').title()} 4-Week Plan"
+            cursor = connection.execute(
+                """
+                INSERT INTO plan (user_id, name, start_date, weeks, status, created_at, updated_at)
+                VALUES (?, ?, ?, 4, 'active', ?, ?)
+                """,
+                (user_id, plan_name, today, now, now),
+            )
+            plan_id = int(cursor.lastrowid)
+
+            pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session)
+            if not pool:
+                raise sqlite3.IntegrityError("session_template empty; cannot generate plan")
+            items = build_plan_structure(pool, ordered_disciplines, days_per_week, minutes_per_session, weeks=4)
+
+            connection.executemany(
+                """
+                INSERT INTO plan_day (plan_id, week, day_index, template_id, title, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (plan_id, item["week"], item["day_index"], item["template_id"], item["title"], now, now)
+                    for item in items
+                ],
+            )
+
+            write_audit(
+                connection,
+                "plan_created",
+                {
+                    "plan_id": plan_id,
+                    "goal": goal,
+                    "days_per_week": days_per_week,
+                    "minutes_per_session": minutes_per_session,
+                    "disciplines": ordered_disciplines,
+                },
+            )
+
+            connection.commit()
+        except (sqlite3.Error, ValueError) as exc:
+            connection.rollback()
+            connection.close()
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        connection.close()
+
+        if request.is_json:
+            return jsonify({"ok": True, "plan_id": plan_id, "redirect": "/plan/current"})
+        return redirect(url_for("plan_current"))
+
+    @app.post("/api/plan/regenerate-next-week")
+    def api_plan_regenerate_next_week():
+        connection = sqlite3.connect(db_path)
+        connection.execute("PRAGMA foreign_keys = ON")
+        now = utc_now_iso()
+        try:
+            user_id = get_or_create_founder_user(connection)
+            row = current_plan_record(connection, user_id)
+            if row is None:
+                raise sqlite3.IntegrityError("No plan found")
+
+            plan_id = int(row["id"])
+            total_weeks = int(row["weeks"])
+            start = date.fromisoformat(row["start_date"])
+            elapsed = max(0, (date.today() - start).days)
+            current_week = min(total_weeks, (elapsed // 7) + 1)
+            next_week = min(total_weeks, current_week + 1)
+
+            profile = connection.execute(
+                "SELECT goal, days_per_week, minutes FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            days_per_week = clamp_int(int(profile[1]) if profile and profile[1] else 4, 2, 6)
+            minutes_per_session = clamp_int(int(profile[2]) if profile and profile[2] else 50, 30, 75)
+            goal = (profile[0] if profile and profile[0] else "hybrid").strip().lower().replace(" ", "_")
+            ordered_disciplines = GOAL_DEFAULTS.get(goal, GOAL_DEFAULTS["hybrid"])
+
+            completed_day_ids = {
+                int(item[0])
+                for item in connection.execute(
+                    """
+                    SELECT sc.plan_day_id
+                    FROM session_completion sc
+                    JOIN plan_day pd ON pd.id = sc.plan_day_id
+                    WHERE pd.plan_id = ? AND pd.week = ?
+                    """,
+                    (plan_id, next_week),
+                ).fetchall()
+            }
+
+            existing_rows = connection.execute(
+                "SELECT id FROM plan_day WHERE plan_id = ? AND week = ?",
+                (plan_id, next_week),
+            ).fetchall()
+            for item in existing_rows:
+                plan_day_id = int(item[0])
+                if plan_day_id not in completed_day_ids:
+                    connection.execute("DELETE FROM plan_day WHERE id = ?", (plan_day_id,))
+
+            pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session)
+            week_items = [
+                item
+                for item in build_plan_structure(pool, ordered_disciplines, days_per_week, minutes_per_session, weeks=next_week)
+                if item["week"] == next_week
+            ]
+
+            existing_day_indexes = {
+                int(row[0])
+                for row in connection.execute(
+                    "SELECT day_index FROM plan_day WHERE plan_id = ? AND week = ?",
+                    (plan_id, next_week),
+                ).fetchall()
+            }
+
+            for item in week_items:
+                if item["day_index"] in existing_day_indexes:
+                    continue
+                connection.execute(
+                    """
+                    INSERT INTO plan_day (plan_id, week, day_index, template_id, title, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (plan_id, item["week"], item["day_index"], item["template_id"], item["title"], now, now),
+                )
+
+            write_audit(connection, "plan_week_regenerated", {"plan_id": plan_id, "week": next_week})
+            connection.commit()
+            payload = {"ok": True, "plan_id": plan_id, "week": next_week}
+        except (sqlite3.Error, ValueError) as exc:
+            connection.rollback()
+            payload = {"ok": False, "error": str(exc)}
+        connection.close()
+
+        if request.is_json:
+            return jsonify(payload), (200 if payload.get("ok") else 400)
+        return redirect(url_for("plan_current"))
+
+    @app.get("/plan/current")
+    def plan_current():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
+        plan = current_plan_record(connection, user_id)
+        if plan is None:
+            connection.close()
+            return render_template("plan_current.html", plan=None, weeks=[], today_week=1, today_day=1)
+
+        rows = connection.execute(
+            """
+            SELECT pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
+            ORDER BY pd.week ASC, pd.day_index ASC
+            """,
+            (int(plan["id"]),),
+        ).fetchall()
+        connection.close()
+
+        weeks_map: dict[int, list[dict]] = {}
+        for row in rows:
+            weeks_map.setdefault(int(row["week"]), []).append(
+                {
+                    "id": int(row["id"]),
+                    "day_index": int(row["day_index"]),
+                    "title": row["title"],
+                    "template_name": row["template_name"],
+                    "discipline": row["discipline"],
+                    "duration_minutes": row["duration_minutes"],
+                }
+            )
+
+        start = date.fromisoformat(plan["start_date"])
+        elapsed = max(0, (date.today() - start).days)
+        today_week = min(int(plan["weeks"]), (elapsed // 7) + 1)
+        today_day = (elapsed % 7) + 1
+
+        week_cards = [{"week": week, "days": days} for week, days in sorted(weeks_map.items())]
+        return render_template(
+            "plan_current.html",
+            plan=plan,
+            weeks=week_cards,
+            today_week=today_week,
+            today_day=today_day,
         )
 
     @app.post("/api/timeline/update")
@@ -223,11 +805,15 @@ def create_app(port: int | None = None) -> Flask:
         curated_routes = [
             {"path": "/", "methods": ["GET"], "description": "Ready landing page"},
             {"path": "/ready", "methods": ["GET"], "description": "Readiness page"},
+            {"path": "/plan/wizard", "methods": ["GET"], "description": "Plan creation wizard"},
+            {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
             {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks"},
             {"path": "/api/spec", "methods": ["GET"], "description": "API + route spec"},
             {"path": "/api/health", "methods": ["GET"], "description": "Legacy API health status"},
+            {"path": "/api/plan/create", "methods": ["POST"], "description": "Create a 4-week plan"},
+            {"path": "/api/plan/regenerate-next-week", "methods": ["POST"], "description": "Regenerate next week plan days"},
             {"path": "/api/timeline/update", "methods": ["POST"], "description": "Update timeline"},
             {"path": "/api/timeline/regenerate", "methods": ["POST"], "description": "Regenerate timeline"},
             {"path": "/api/timeline/apply_global", "methods": ["POST"], "description": "Apply global timeline config"},
@@ -246,20 +832,10 @@ def create_app(port: int | None = None) -> Flask:
             if rule.rule in seen_paths:
                 continue
             methods = sorted(m for m in rule.methods if m not in {"HEAD", "OPTIONS"})
-            curated_routes.append(
-                {
-                    "path": rule.rule,
-                    "methods": methods,
-                    "description": "Auto-discovered route",
-                }
-            )
+            curated_routes.append({"path": rule.rule, "methods": methods, "description": "Auto-discovered route"})
             seen_paths.add(rule.rule)
 
-        return {
-            "name": app.config["APP_NAME"],
-            "version": app.config["VERSION"],
-            "routes": curated_routes,
-        }
+        return {"name": app.config["APP_NAME"], "version": app.config["VERSION"], "routes": curated_routes}
 
     @app.get("/api/spec")
     def api_spec():
@@ -271,15 +847,9 @@ def create_app(port: int | None = None) -> Flask:
             "/health",
             "/version",
             "/api/health",
-            "/api/timeline/update",
-            "/api/timeline/regenerate",
-            "/api/timeline/apply_global",
-            "/api/critic/run",
-            "/api/approve",
-            "/api/export",
-            "/api/import",
-            "/api/projects/<code>",
-            "/api/agents/enhance",
+            "/api/plan/create",
+            "/plan/wizard",
+            "/plan/current",
             "/api/spec",
             "/diagnostics",
             "/ready",
@@ -288,9 +858,11 @@ def create_app(port: int | None = None) -> Flask:
         spec_routes = {route["path"] for route in app_spec()["routes"]}
         missing_from_spec = [route for route in needed if route not in spec_routes]
 
+        snapshot = db_integrity_snapshot(db_path)
         checks = {
             "health_route": "PASS" if "/health" in spec_routes else "FAIL",
             "spec_mismatch": "FAIL" if missing_from_spec else "PASS",
+            "db_integrity": "PASS" if snapshot["db_ok"] else "FAIL",
         }
 
         return jsonify(
@@ -299,6 +871,8 @@ def create_app(port: int | None = None) -> Flask:
                 "needed": needed,
                 "checks": checks,
                 "missing_from_spec": missing_from_spec,
+                "template_count": snapshot["template_count"],
+                "missing_tables": snapshot["missing_tables"],
             }
         )
 
