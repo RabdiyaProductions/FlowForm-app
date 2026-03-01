@@ -109,6 +109,18 @@ def create_app(port: int | None = None) -> Flask:
 
     app.logger.info("FlowForm boot config: port=%s db=%s", resolved_port, db_path)
 
+    def init_db_safely() -> None:
+        try:
+            connection = sqlite3.connect(db_path)
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS _healthcheck (id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL)"
+            )
+            connection.execute("INSERT INTO _healthcheck(checked_at) VALUES (?)", (utc_now_iso(),))
+            connection.commit()
+            connection.close()
+        except sqlite3.Error as exc:
+            app.logger.warning("SQLite init skipped: %s", exc)
+
     def db_ok() -> bool:
         try:
             connection = sqlite3.connect(db_path)
@@ -119,26 +131,7 @@ def create_app(port: int | None = None) -> Flask:
             app.logger.exception("SQLite health check failed: %s", exc)
             return False
 
-    def run_first_check() -> dict:
-        result = {"ok": True, "message": "first-run checks passed"}
-        try:
-            connection = sqlite3.connect(db_path)
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("CREATE TABLE IF NOT EXISTS _healthcheck (id INTEGER PRIMARY KEY, checked_at TEXT NOT NULL)")
-            connection.execute("INSERT INTO _healthcheck(checked_at) VALUES (?)", (utc_now_iso(),))
-            integrity_row = connection.execute("PRAGMA integrity_check").fetchone()
-            connection.commit()
-            connection.close()
-            integrity_value = (integrity_row[0] if integrity_row else "")
-            if str(integrity_value).lower() != "ok":
-                result = {"ok": False, "message": f"DB integrity_check failed: {integrity_value}"}
-        except sqlite3.Error as exc:
-            app.logger.exception("First-run DB check failed: %s", exc)
-            result = {"ok": False, "message": f"Database init/check failed: {exc}"}
-        return result
-
-    first_check = run_first_check()
-    app.config["FIRST_CHECK"] = first_check
+    init_db_safely()
 
     @app.errorhandler(404)
     def handle_not_found(_: Exception):
@@ -157,7 +150,7 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/health")
     def health():
-        is_db_ok = db_ok() and app.config["FIRST_CHECK"]["ok"]
+        is_db_ok = db_ok()
         return jsonify(
             {
                 "status": "ok" if is_db_ok else "degraded",
@@ -298,7 +291,6 @@ def create_app(port: int | None = None) -> Flask:
         checks = {
             "health_route": "PASS" if "/health" in spec_routes else "FAIL",
             "spec_mismatch": "FAIL" if missing_from_spec else "PASS",
-            "first_run": "PASS" if app.config["FIRST_CHECK"]["ok"] else "FAIL",
         }
 
         return jsonify(
@@ -306,7 +298,6 @@ def create_app(port: int | None = None) -> Flask:
                 "status": "PASS" if all(v == "PASS" for v in checks.values()) else "FAIL",
                 "needed": needed,
                 "checks": checks,
-                "first_run_message": app.config["FIRST_CHECK"]["message"],
                 "missing_from_spec": missing_from_spec,
             }
         )

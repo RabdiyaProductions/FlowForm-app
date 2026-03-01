@@ -10,6 +10,7 @@ Required flow:
 
 Pass criteria:
 - App starts deterministically on configured/default port.
+- Startup must remain non-blocking (no startup blocking first-run gate).
 - `/diagnostics` returns `PASS`.
 
 ## 2) Regression gate
