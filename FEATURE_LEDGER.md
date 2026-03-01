@@ -83,6 +83,11 @@ Behavior:
   - `flowform_backup.json` (full JSON snapshot),
   - `settings.json` (runtime settings snapshot),
   - `manifest.json` (counts summary + warning),
+- `media/*` files from `instance/media/`.
+- Exports page includes:
+  - **Download Full Backup (ZIP)**,
+  - **Export Plan (PDF/HTML)**,
+  - **Export History (CSV)** via `GET /api/export/history.csv`.
   - `media/*` files from `instance/media/`.
 
 #### Restore UI: `GET /restore`
@@ -97,6 +102,7 @@ Behavior:
 - returns summary (`plans/templates/completions/recovery/media_files`) and overwrite warning,
 - requires confirmation (`confirm_overwrite=true`) before applying restore,
 - restore is staged and applied all-or-nothing; failures return error without partial apply.
+- backup ZIP validation rejects unsafe or unexpected entries (path traversal hardened).
 
 Exact click steps:
 1. Open `/exports`.

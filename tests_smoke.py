@@ -362,6 +362,62 @@ def test_full_backup_endpoint_contains_manifest_and_settings(tmp_path, monkeypat
     assert 'warning' in manifest
 
 
+def test_export_history_csv_contains_completion_and_recovery(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'history.csv.db'))
+    app = create_app(port=5432)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    con = sqlite3.connect(app.config['DB_PATH'])
+    plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+    client.post('/api/session/finish', json={'plan_day_id': plan_day_id, 'rpe': 7, 'notes': 'csv', 'minutes_done': 40})
+    client.post('/api/recovery/checkin', json={
+        'date': '2026-03-02', 'sleep_hours': 7.0, 'stress_1_10': 4, 'soreness_1_10': 4, 'mood_1_10': 7,
+    })
+
+    csv_res = client.get('/api/export/history.csv')
+    assert csv_res.status_code == 200
+    assert csv_res.headers['Content-Type'].startswith('text/csv')
+    body = csv_res.data.decode('utf-8')
+    assert 'section,id,date,week,day,title' in body
+    assert 'completion' in body
+    assert 'recovery' in body
+
+
+def test_restore_rejects_zip_path_traversal(tmp_path, monkeypatch):
+    import io
+    import zipfile
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'traversal.db'))
+    app = create_app(port=5433)
+    client = app.test_client()
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('flowform.db', b'not-a-real-db')
+        zf.writestr('../evil.txt', 'bad')
+    buf.seek(0)
+
+    res = client.post(
+        '/api/import/backup',
+        data={'file': (buf, 'bad.zip')},
+        content_type='multipart/form-data',
+    )
+    assert res.status_code == 400
+    payload = res.get_json()
+    assert payload['error'] in {'invalid_zip_path', 'unexpected_zip_entry'}
+
+
 def test_restore_backup_preview_and_apply(tmp_path, monkeypatch):
     import io
     import sqlite3

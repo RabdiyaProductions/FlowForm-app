@@ -80,6 +80,13 @@
 - ZIP contains `media/` files when media exists,
 - backup can be created in one click without app errors.
 
+Exact click steps:
+1. Create a plan and complete at least one session.
+2. Open `/exports`.
+3. Click **Download Full Backup (ZIP)**.
+4. Click **Export History (CSV)**.
+5. Click **Download Plan HTML** and **Download plan PDF**.
+
 
 ## Journey 8 — Restore requires confirmation and overwrites safely
 **Steps**
@@ -93,6 +100,12 @@
 - restore only runs after confirmation,
 - restore failure returns error with no partial apply,
 - successful restore replaces current DB/media with backup state.
+
+Recovery drill:
+1. Backup from `/exports`.
+2. Stop app and remove/rename local DB file.
+3. Start app, open `/restore`, preview summary, confirm restore.
+4. Open `/plan/current` and verify plan/completion/recovery data reappears.
 
 
 ## Journey 9 — PDF exports are readable and complete

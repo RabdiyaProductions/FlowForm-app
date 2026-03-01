@@ -10,6 +10,7 @@ import io
 import zipfile
 import tempfile
 import shutil
+import csv
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -43,14 +44,6 @@ def env_flag_true(value: str | None) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
-DISCIPLINES = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance"]
-GOAL_DEFAULTS = {
-    "strength": ["strength", "mobility", "recovery", "conditioning", "cardio"],
-    "fat_loss": ["conditioning", "cardio", "strength", "mobility", "recovery"],
-    "mobility": ["mobility", "recovery", "strength", "cardio", "conditioning"],
-    "stress": ["recovery", "mobility", "cardio", "strength", "conditioning"],
-    "hybrid": ["strength", "cardio", "mobility", "conditioning", "recovery"],
-}
 
 
 def load_env_file(env_path: Path) -> None:
@@ -440,7 +433,6 @@ def preferred_disciplines(payload: dict) -> list[str]:
 
 
 def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int, limit_templates: int | None = None) -> list[dict]:
-def fetch_template_pool(connection: sqlite3.Connection, ordered_disciplines: list[str], target_minutes: int) -> list[dict]:
     rows = connection.execute(
         """
         SELECT id, name, discipline, duration_minutes, level
@@ -898,6 +890,24 @@ def backup_manifest(connection: sqlite3.Connection) -> dict:
         "warning": "Restoring this backup overwrites current database and media files.",
     }
 
+
+def validate_backup_zip_names(names: set[str]) -> tuple[bool, str]:
+    if "flowform.db" not in names:
+        return False, "flowform.db_missing"
+    allowed_top_level = {"flowform.db", "flowform_backup.json", "settings.json", "manifest.json"}
+    for name in names:
+        if name.endswith("/"):
+            continue
+        normalized = name.replace("\\", "/")
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            return False, "invalid_zip_path"
+        if normalized in allowed_top_level:
+            continue
+        if normalized.startswith("media/") and len(normalized.split("/")) == 2:
+            continue
+        return False, "unexpected_zip_entry"
+    return True, "ok"
+
 def create_app(port: int | None = None) -> Flask:
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
@@ -945,6 +955,23 @@ def create_app(port: int | None = None) -> Flask:
         def wrapped(*args, **kwargs):
             if not auth_enabled():
                 return view(*args, **kwargs)
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
             connection = sqlite3.connect(db_path)
             uid = current_user_id(connection)
             connection.close()
@@ -1903,6 +1930,70 @@ def create_app(port: int | None = None) -> Flask:
         response.headers["Content-Disposition"] = "attachment; filename=flowform_plan_export.html"
         return response
 
+    @app.get("/api/export/history.csv")
+    @require_login
+    def api_export_history_csv():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+
+        completions = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.week, pd.day_index, pd.title
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            JOIN plan p ON p.id = pd.plan_id
+            WHERE p.user_id = ?
+            ORDER BY sc.completed_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        recovery = connection.execute(
+            """
+            SELECT id, date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
+            FROM recovery_checkin
+            WHERE user_id = ?
+            ORDER BY date DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        connection.close()
+
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        writer.writerow(["section", "id", "date", "week", "day", "title", "rpe", "minutes_done", "sleep_hours", "stress", "soreness", "mood", "notes"])
+        for row in completions:
+            writer.writerow([
+                "completion",
+                row["id"],
+                row["completed_at"],
+                row["week"],
+                row["day_index"],
+                row["title"] or "",
+                row["rpe"],
+                row["minutes_done"],
+                "", "", "", "",
+                row["notes"] or "",
+            ])
+        for row in recovery:
+            writer.writerow([
+                "recovery",
+                row["id"],
+                row["date"],
+                "", "", "", "", "",
+                row["sleep_hours"],
+                row["stress_1_10"],
+                row["soreness_1_10"],
+                row["mood_1_10"],
+                row["notes"] or "",
+            ])
+
+        response = make_response(stream.getvalue())
+        response.headers["Content-Type"] = "text/csv; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_history.csv"
+        return response
+
     @app.get("/api/export/json")
     @require_login
     def api_export_json():
@@ -2065,6 +2156,9 @@ def create_app(port: int | None = None) -> Flask:
             return jsonify({"ok": False, "error": "invalid_zip"}), 400
 
         names = set(zf.namelist())
+        ok, error_code = validate_backup_zip_names(names)
+        if not ok:
+            return jsonify({"ok": False, "error": error_code, "message": "Backup ZIP contains invalid or unsafe paths."}), 400
         if "flowform.db" not in names:
             return jsonify({"ok": False, "error": "flowform.db_missing"}), 400
 
@@ -2095,6 +2189,8 @@ def create_app(port: int | None = None) -> Flask:
         stage_db = temp_dir / "flowform.db"
         stage_media = temp_dir / "media"
         stage_media.mkdir(exist_ok=True)
+        old_db = db_target.with_suffix(".pre_restore.bak")
+        old_media = MEDIA_DIR.parent / "media_pre_restore"
 
         try:
             stage_db.write_bytes(zf.read("flowform.db"))
@@ -2130,6 +2226,20 @@ def create_app(port: int | None = None) -> Flask:
                 old_db.unlink(missing_ok=True)
 
         except Exception as exc:
+            if old_db.exists():
+                try:
+                    shutil.copy2(old_db, db_target)
+                except Exception:
+                    pass
+            if old_media.exists():
+                try:
+                    if MEDIA_DIR.exists():
+                        shutil.rmtree(MEDIA_DIR)
+                    old_media.replace(MEDIA_DIR)
+                except Exception:
+                    pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"ok": False, "error": "restore_failed", "message": str(exc)}), 400
             shutil.rmtree(temp_dir, ignore_errors=True)
             return jsonify({"ok": False, "error": str(exc)}), 400
 
@@ -2189,6 +2299,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/api/export", "methods": ["POST"], "description": "Export project"},
             {"path": "/api/export/plan", "methods": ["GET"], "description": "Download plan HTML export"},
             {"path": "/api/export/json", "methods": ["GET"], "description": "Download full backup JSON"},
+            {"path": "/api/export/history.csv", "methods": ["GET"], "description": "Download history CSV export"},
             {"path": "/api/export/zip", "methods": ["GET"], "description": "Download zip bundle"},
             {"path": "/api/export/backup", "methods": ["GET"], "description": "Download full-fidelity backup ZIP"},
             {"path": "/api/export/plan_pdf/<plan_id>", "methods": ["GET"], "description": "Download plan PDF"},
@@ -2238,6 +2349,7 @@ def create_app(port: int | None = None) -> Flask:
             "/api/recovery/checkin",
             "/api/export/plan",
             "/api/export/json",
+            "/api/export/history.csv",
             "/api/export/backup",
             "/api/export/plan_pdf/<plan_id>",
             "/api/export/session_summary/<completion_id>",
