@@ -6,6 +6,13 @@ import logging
 import os
 import sqlite3
 import subprocess
+import io
+import zipfile
+from datetime import date, datetime, timedelta, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
+from flask import Flask, jsonify, make_response, redirect, render_template, request, send_file, url_for
 from datetime import date, datetime, timedelta, timezone
 from datetime import date, datetime, timezone
 from logging.handlers import RotatingFileHandler
@@ -635,6 +642,120 @@ def analytics_snapshot(connection: sqlite3.Connection, user_id: int) -> dict:
         },
     }
 
+
+def export_snapshot(connection: sqlite3.Connection, user_id: int) -> dict:
+    connection.row_factory = sqlite3.Row
+    plan = current_plan_record(connection, user_id)
+
+    profile = connection.execute(
+        """
+        SELECT goal, days_per_week, minutes, equipment, constraints, created_at, updated_at
+        FROM profile
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+
+    plan_days = []
+    completions = []
+    if plan is not None:
+        plan_days = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT pd.id, pd.plan_id, pd.week, pd.day_index, pd.title, pd.created_at, pd.updated_at,
+                       st.id AS template_id, st.name AS template_name, st.discipline, st.duration_minutes
+                FROM plan_day pd
+                LEFT JOIN session_template st ON st.id = pd.template_id
+                WHERE pd.plan_id = ?
+                ORDER BY pd.week ASC, pd.day_index ASC
+                """,
+                (int(plan["id"]),),
+            ).fetchall()
+        ]
+
+        completions = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT sc.id, sc.plan_day_id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done, sc.created_at, sc.updated_at
+                FROM session_completion sc
+                JOIN plan_day pd ON pd.id = sc.plan_day_id
+                WHERE pd.plan_id = ?
+                ORDER BY sc.completed_at DESC
+                """,
+                (int(plan["id"]),),
+            ).fetchall()
+        ]
+
+    templates = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT id, name, discipline, duration_minutes, level, json_blocks, created_at, updated_at
+            FROM session_template
+            ORDER BY id ASC
+            """
+        ).fetchall()
+    ]
+
+    recovery = [
+        dict(row)
+        for row in connection.execute(
+            """
+            SELECT id, date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes, created_at, updated_at
+            FROM recovery_checkin
+            WHERE user_id = ?
+            ORDER BY date DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    ]
+
+    return {
+        "exported_at": utc_now_iso(),
+        "app": {"name": APP_NAME, "version": APP_VERSION},
+        "user": {"id": user_id},
+        "profile": dict(profile) if profile else None,
+        "plan": dict(plan) if plan else None,
+        "plan_days": plan_days,
+        "templates": templates,
+        "completions": completions,
+        "recovery": recovery,
+    }
+
+
+def render_plan_export_html(payload: dict) -> str:
+    plan = payload.get("plan") or {}
+    profile = payload.get("profile") or {}
+    days = payload.get("plan_days") or []
+    completions = {item["plan_day_id"]: item for item in (payload.get("completions") or [])}
+
+    rows = []
+    for item in days:
+        status = "Completed" if item["id"] in completions else "Pending"
+        rows.append(
+            f"<tr><td>{item['week']}</td><td>{item['day_index']}</td><td>{item.get('title','')}</td><td>{item.get('template_name','')}</td><td>{item.get('discipline','')}</td><td>{item.get('duration_minutes','')}</td><td>{status}</td></tr>"
+        )
+
+    rows_html = "".join(rows) if rows else '<tr><td colspan="7">No plan days available.</td></tr>'
+
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'><title>FlowForm Plan Export</title>
+<style>body{{font-family:Arial,sans-serif;margin:24px}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:8px;text-align:left}}</style>
+</head><body>
+<h1>FlowForm Plan Export</h1>
+<p><strong>Generated:</strong> {payload.get('exported_at','')}</p>
+<p><strong>Plan:</strong> {plan.get('name','N/A')} | Start: {plan.get('start_date','N/A')} | Weeks: {plan.get('weeks','N/A')}</p>
+<p><strong>Profile:</strong> Goal {profile.get('goal','N/A')} · Days/week {profile.get('days_per_week','N/A')} · Minutes {profile.get('minutes','N/A')}</p>
+<p><strong>Safety disclaimer:</strong> Training guidance is informational and not medical advice.</p>
+<h2>Plan days</h2>
+<table><thead><tr><th>Week</th><th>Day</th><th>Title</th><th>Template</th><th>Discipline</th><th>Minutes</th><th>Status</th></tr></thead><tbody>{rows_html}</tbody></table>
+</body></html>
+"""
+
 def create_app(port: int | None = None) -> Flask:
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
@@ -1228,6 +1349,60 @@ def create_app(port: int | None = None) -> Flask:
     def api_approve():
         return jsonify({"ok": True, "route": "/api/approve"})
 
+    @app.get("/exports")
+    def exports_page():
+        return render_template("exports.html")
+
+    @app.get("/api/export/plan")
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        html = render_plan_export_html(payload)
+        response = make_response(html)
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_plan_export.html"
+        return response
+
+    @app.get("/api/export/json")
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        response = make_response(json.dumps(payload, indent=2))
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_backup.json"
+        return response
+
+    @app.get("/api/export/zip")
+    def api_export_zip():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        html = render_plan_export_html(payload)
+        json_blob = json.dumps(payload, indent=2)
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("flowform_plan_export.html", html)
+            zf.writestr("flowform_backup.json", json_blob)
+            if Path(app.config["DB_PATH"]).exists():
+                zf.write(app.config["DB_PATH"], arcname="flowform.db")
+        memory.seek(0)
+
+        return send_file(
+            memory,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="flowform_export_bundle.zip",
+        )
+
     @app.post("/api/export")
     def api_export():
         return jsonify({"ok": True, "route": "/api/export"})
@@ -1252,6 +1427,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
             {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
             {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
+            {"path": "/exports", "methods": ["GET"], "description": "Exports page"},
             {"path": "/api/recovery/checkin", "methods": ["POST"], "description": "Persist daily recovery check-in"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
@@ -1270,6 +1446,9 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/api/critic/run", "methods": ["POST"], "description": "Run critic pass"},
             {"path": "/api/approve", "methods": ["POST"], "description": "Approve current draft"},
             {"path": "/api/export", "methods": ["POST"], "description": "Export project"},
+            {"path": "/api/export/plan", "methods": ["GET"], "description": "Download plan HTML export"},
+            {"path": "/api/export/json", "methods": ["GET"], "description": "Download full backup JSON"},
+            {"path": "/api/export/zip", "methods": ["GET"], "description": "Download zip bundle"},
             {"path": "/api/import", "methods": ["POST"], "description": "Import project"},
             {"path": "/api/projects/<code>", "methods": ["GET"], "description": "Fetch project by code"},
             {"path": "/api/agents/enhance", "methods": ["POST"], "description": "Enhance via agent"},
@@ -1302,6 +1481,10 @@ def create_app(port: int | None = None) -> Flask:
             "/plan/current",
             "/recovery",
             "/analytics",
+            "/exports",
+            "/api/recovery/checkin",
+            "/api/export/plan",
+            "/api/export/json",
             "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",

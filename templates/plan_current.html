@@ -20,6 +20,7 @@
     {% endif %}
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
       {% if today_plan_day_id %}<a class="btn" href="/session/start/{{ today_plan_day_id }}">Start today’s session</a>{% else %}<a class="btn" href="/plan/wizard">Start today’s session</a>{% endif %}
+      <a class="btn" href="/exports">Downloads</a>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px;">
       <a class="btn" href="#today-session">Start today’s session</a>
       <form method="post" action="/api/plan/regenerate-next-week" style="margin:0;">

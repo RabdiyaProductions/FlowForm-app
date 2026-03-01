@@ -256,3 +256,59 @@ def test_analytics_updates_after_completion(tmp_path, monkeypatch):
     assert b'Average RPE' in body
     assert b'Readiness trend' in body
     assert b'Takeaway:' in body
+
+
+def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'exports.db'))
+    app = create_app(port=5415)
+    client = app.test_client()
+
+    client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+
+    import sqlite3, json as _json, zipfile, io
+    con = sqlite3.connect(app.config['DB_PATH'])
+    plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+
+    client.post('/api/session/finish', json={
+        'plan_day_id': plan_day_id,
+        'rpe': 7,
+        'notes': 'done',
+        'minutes_done': 40,
+    })
+    client.post('/api/recovery/checkin', json={
+        'date': '2026-03-01',
+        'sleep_hours': 7.2,
+        'stress_1_10': 4,
+        'soreness_1_10': 4,
+        'mood_1_10': 7,
+    })
+
+    exports_page = client.get('/exports')
+    assert exports_page.status_code == 200
+    assert b'Download Full Backup JSON' in exports_page.data
+
+    plan_html = client.get('/api/export/plan')
+    assert plan_html.status_code == 200
+    assert b'FlowForm Plan Export' in plan_html.data
+
+    backup = client.get('/api/export/json')
+    assert backup.status_code == 200
+    payload = _json.loads(backup.data.decode('utf-8'))
+    assert payload['plan'] is not None
+    assert len(payload['templates']) > 0
+    assert len(payload['completions']) > 0
+    assert len(payload['recovery']) > 0
+
+    bundle = client.get('/api/export/zip')
+    assert bundle.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(bundle.data))
+    names = set(zf.namelist())
+    assert 'flowform_backup.json' in names
+    assert 'flowform_plan_export.html' in names
+    assert 'flowform.db' in names
