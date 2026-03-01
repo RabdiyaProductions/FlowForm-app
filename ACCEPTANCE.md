@@ -1,56 +1,69 @@
-# ACCEPTANCE (True Ready Definition)
+# ACCEPTANCE
 
-This acceptance definition reflects the **current repository state**.
+This file defines the **top 5 founder journeys** against what is currently implemented.
 
-## 1) Boot determinism
-Required flow:
-1. Run `_BAT/1_setup.bat`
-2. Run `_BAT/2_run.bat`
-3. Open `/diagnostics`
+## Journey 1 — First setup to first ready screen
+**Goal:** Fresh machine can install and boot deterministically.
 
-Pass criteria:
-- App starts deterministically on configured/default port.
-- Startup must remain non-blocking (no startup blocking first-run gate).
-- `/diagnostics` returns `PASS`.
+**Click steps**
+1. Run `00_setup_all.bat` (or `_BAT/1_setup.bat`).
+2. Run `01_run_all.bat` (or `_BAT/2_run.bat`).
+3. Open `/ready` in browser.
 
-## 2) Regression gate
-Required flow:
-- Run `python tools/run_full_tests.py` (or `_BAT/6_run_tests.bat`).
+**Accept if**
+- venv and dependencies install successfully.
+- server starts on resolved port.
+- `/ready` returns HTTP 200 and renders the ready template.
 
-Pass criteria:
-- Runner exits with code `0`.
-- Both smoke suites pass.
+## Journey 2 — Founder creates a 4-week plan from wizard
+**Goal:** Build and persist a plan from UI inputs.
 
-## 3) Critical path (product readiness target)
-Target path:
-1. Create project
-2. Generate pilot
-3. Critic run
-4. Approve
-5. Export
+**Click steps**
+1. Open `/plan/wizard`.
+2. Select goal (`strength`, `fat_loss`, `mobility`, `stress`, or `hybrid`).
+3. Set days/week (2–6) and minutes/session (30–75).
+4. Rank 5 discipline preferences.
+5. Add injury flags, equipment, and constraints.
+6. Click **Create 4-week plan**.
 
-Pass criteria:
-- Each step completes with valid state transitions and artifacts.
+**Accept if**
+- Browser redirects to `/plan/current`.
+- New `plan` row is saved with `weeks=4` and `status=active`.
+- `plan_day` rows exist for all planned days.
 
-Current snapshot note:
-- Timeline/critic/approve/import/export endpoints are present as lightweight ack-style APIs; full end-to-end stateful pipeline is not fully implemented yet.
+## Journey 3 — Founder reviews plan and today selection
+**Goal:** View the saved plan in calendar style and identify today.
 
-## 4) Export quality
-Required for true ready:
-- Export ZIP is produced.
-- ZIP includes `manifest.json` and required payload files.
+**Click steps**
+1. Open `/plan/current`.
+2. Review Week/Day table cards.
+3. Confirm row marked **Today**.
 
-Current snapshot note:
-- `/api/export` currently returns JSON ack; ZIP/manifest artifact quality gate is not yet implemented.
+**Accept if**
+- Plan survives refresh (`/plan/current` still populated).
+- Week/day list is shown in calendar-style table layout.
+- Today’s week/day indicator appears.
 
-## 5) Error handling and gating
-Required for true ready:
-- Missing required fields return clear actionable messages.
-- Approval gating is enforced.
+## Journey 4 — Founder starts session or regenerates next week
+**Goal:** Use plan CTAs without losing completion history.
 
-Current snapshot note:
-- Robust field-level validation/gating for the full pipeline is not fully implemented.
+**Click steps**
+1. On `/plan/current`, click **Start today's session**.
+2. Return and click **Regenerate next week**.
 
-## 6) Explicit non-goal
-- Final MP4 rendering is **NOT required yet**.
-- Current expected engine output is specs/packs and workflow orchestration readiness.
+**Accept if**
+- Start CTA is available from current plan view.
+- Regenerate CTA refreshes only the upcoming week schedule.
+- Completed sessions are not deleted during regeneration.
+
+## Journey 5 — Founder checks system health and guard rails
+**Goal:** Ensure readiness + structure safety.
+
+**Click steps**
+1. Open `/health`, `/api/health`, and `/diagnostics`.
+2. Run `_BAT/6_run_tests.bat` (or `python tools/run_full_tests.py`).
+
+**Accept if**
+- `/api/health` returns `db_ok=true` and `template_count>0`.
+- `/diagnostics` shows `PASS`.
+- structure guard and smoke tests pass.
