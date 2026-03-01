@@ -144,6 +144,8 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/")
     def root():
+        if not app.config["FIRST_CHECK"]["ok"]:
+            return render_template("first_run_error.html", error_message=app.config["FIRST_CHECK"]["message"]), 500
         return render_template("ready.html")
 
     @app.get("/health")
@@ -161,7 +163,7 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/api/health")
     def api_health():
-        is_db_ok = db_ok()
+        is_db_ok = db_ok() and app.config["FIRST_CHECK"]["ok"]
         payload = {
             "status": "ok" if is_db_ok else "degraded",
             "port": app.config["PORT"],
@@ -302,6 +304,8 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/ready")
     def ready():
+        if not app.config["FIRST_CHECK"]["ok"]:
+            return render_template("first_run_error.html", error_message=app.config["FIRST_CHECK"]["message"]), 500
         return render_template("ready.html")
 
     return app

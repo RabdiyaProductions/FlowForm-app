@@ -1,71 +1,69 @@
-# FlowForm Vitality Master Suite — Hardened Boot MVP
+# FlowForm App
 
-## Boot entrypoints (authoritative)
+This repo provides a minimal Flask service with health/readiness endpoints and smoke tests.
 
-- `00_setup_all.bat`
-  - Creates `.venv` if missing
-  - Upgrades pip tooling
-  - Installs `requirements.txt`
-  - Resolves runtime port and writes `ACTIVE_PORTS.json`
-- `01_run_all.bat`
-  - Resolves runtime port with `boot_port.py`
-  - Starts the Flask server with **venv python only**
-  - Waits for the port to become reachable
-  - Opens browser to `/ready`
+## Python version
 
-## Port resolution
+Use **Python 3.10**.
 
-Implemented in `boot_port.py`:
-1. Prefer port from `PORTS.json` key `FlowForm-app` (or `apps.FlowForm-app`) when present.
-2. If preferred port is busy or missing, choose first free port in `5400–5499`.
-3. Write selected port to `ACTIVE_PORTS.json`.
-
-## API/Ready endpoints
-
-- `GET /api/health` → JSON:
-  - `status`
-  - `port`
-  - `db_ok`
-  - `version`
-- `GET /ready` → dark-themed readiness page that fetches `/api/health`.
-
-## Local run (Windows)
-
-1. Run `00_setup_all.bat`
-2. Run `01_run_all.bat`
-
-## Local run (any OS for development)
+## Setup (virtualenv)
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-python run_server.py --port 5410
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install Flask pytest
 ```
 
-Then open: `http://127.0.0.1:5410/ready`
+## `.env` template values
 
-## Environment config
-
-Copy `.env.example` to `.env` and adjust as needed.
+Create `.env` in the repository root:
 
 ```env
+FLASK_APP=app.py
+FLASK_ENV=development
 HOST=127.0.0.1
-PORT=5410
-DB_PATH=./data/flowform.db
+PORT=5000
+DATABASE_PATH=instance/flowform.db
+OPENAI_API_KEY=your_openai_api_key_here
+LOG_LEVEL=INFO
 ```
 
-Note: explicit `--port` on `run_server.py` takes precedence over `.env` `PORT`.
+Notes:
+- Leave `OPENAI_API_KEY` empty (`OPENAI_API_KEY=`) to disable AI features gracefully.
+- If `DATABASE_PATH` is not set, `instance/flowform.db` is used.
 
-## Smoke test
+## DB initialization behavior
+
+On startup (`create_app()`), the app automatically:
+1. Creates the database directory if missing.
+2. Creates the SQLite DB file if missing.
+3. Creates table `app_metadata` if missing.
+4. Inserts `initialized=true` once using `INSERT OR IGNORE`.
+
+No separate migration/init command is required for local smoke tests.
+
+## Run command and default URLs
+
+Run the service:
 
 ```bash
-pytest tests_smoke.py
+flask --app app:create_app run --host 127.0.0.1 --port 5000
 ```
 
+Default URLs:
+- Home: `http://127.0.0.1:5000/`
+- Health: `http://127.0.0.1:5000/api/health`
+- Ready: `http://127.0.0.1:5000/ready`
 
-Additional runtime smoke:
+## CI-ready test command
 
 ```bash
-pytest smoke_test.py
+pytest -q
+```
+
+Optional stricter CI command:
+
+```bash
+pytest -q --maxfail=1 --disable-warnings
 ```

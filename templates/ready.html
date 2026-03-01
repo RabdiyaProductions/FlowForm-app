@@ -1,64 +1,20 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>FlowForm — Ready</title>
-  <style>
-    :root { --bg:#0b1220; --card:#111a2e; --text:#e8f0ff; --muted:#8ea2c7; --accent:#1aa6a6; --border:#21304f; }
-    * { box-sizing: border-box; }
-    body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial; background:var(--bg); color:var(--text); }
-    .wrap { max-width: 880px; margin: 0 auto; padding: 28px 16px; }
-    .card { background:var(--card); border:1px solid var(--border); border-radius:14px; padding:18px; }
-    h1 { margin: 0 0 10px; font-size: 28px; }
-    .muted { color: var(--muted); }
-    .grid { margin-top: 14px; display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
-    .k { color: var(--muted); font-size:12px; text-transform:uppercase; letter-spacing: .04em; }
-    .v { font-weight: 800; margin-top:4px; }
-    .ok { color: #56d4b7; }
-    .err { color: #f28b8b; }
-    @media (max-width:700px){ .grid { grid-template-columns: 1fr; }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h1>FlowForm Boot Ready</h1>
-      <p class="muted">Live readiness state from <code>/api/health</code>.</p>
-      <div class="grid">
-        <div><div class="k">Status</div><div class="v" id="status">Loading…</div></div>
-        <div><div class="k">Port</div><div class="v" id="port">-</div></div>
-        <div><div class="k">Database</div><div class="v" id="db">-</div></div>
-        <div><div class="k">Version</div><div class="v" id="version">-</div></div>
-      </div>
-    </div>
-  </div>
-  <script>
-    async function hydrateHealth() {
-      const statusEl = document.getElementById('status');
-      const portEl = document.getElementById('port');
-      const dbEl = document.getElementById('db');
-      const versionEl = document.getElementById('version');
-
-      try {
-        const response = await fetch('/api/health', { cache: 'no-store' });
-        if (!response.ok) throw new Error('Health request failed');
-        const data = await response.json();
-
-        statusEl.textContent = data.status;
-        statusEl.className = `v ${data.status === 'ok' ? 'ok' : 'err'}`;
-        portEl.textContent = data.port;
-        dbEl.textContent = data.db_ok ? 'Connected' : 'Disconnected';
-        dbEl.className = `v ${data.db_ok ? 'ok' : 'err'}`;
-        versionEl.textContent = data.version;
-      } catch (err) {
-        statusEl.textContent = 'error';
-        statusEl.className = 'v err';
-        dbEl.textContent = 'Unavailable';
-        dbEl.className = 'v err';
-      }
-    }
-    hydrateHealth();
-  </script>
-</body>
-</html>
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>System Ready</h1>
+  <p class="muted">Live status from /api/health.</p>
+  <p>Status: <span id="status">...</span></p>
+  <p>Port: <span id="port">...</span></p>
+  <p>DB: <span id="db">...</span></p>
+</div>
+<script>
+(async () => {
+  const res = await fetch('/api/health');
+  if (!res.ok) return;
+  const data = await res.json();
+  document.getElementById('status').textContent = data.status;
+  document.getElementById('port').textContent = data.port;
+  document.getElementById('db').textContent = data.db_ok ? 'ok' : 'degraded';
+})();
+</script>
+{% endblock %}
