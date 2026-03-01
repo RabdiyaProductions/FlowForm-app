@@ -2,6 +2,9 @@
 {% block content %}
 <div class="card">
   <h1>Login</h1>
+  {% if auth_disabled_note %}<p class="muted">Auth disabled. Founder Mode is active.</p>{% endif %}
+  {% if error %}<p style="color:#ff8e8e;">{{ error }}</p>{% endif %}
+  {% if not auth_disabled_note %}
   {% if error %}<p style="color:#ff8e8e;">{{ error }}</p>{% endif %}
   <form method="post" action="/login">
     <label>Email</label>
@@ -11,5 +14,6 @@
     <button class="btn" type="submit">Log in</button>
   </form>
   <p class="muted">Need an account? <a href="/signup">Sign up</a></p>
+  {% endif %}
 </div>
 {% endblock %}

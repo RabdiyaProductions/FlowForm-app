@@ -38,6 +38,11 @@ GOAL_DEFAULTS = {
     "hybrid": ["strength", "cardio", "mobility", "conditioning", "recovery"],
 }
 
+
+def env_flag_true(value: str | None) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 DISCIPLINES = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance"]
 GOAL_DEFAULTS = {
     "strength": ["strength", "mobility", "recovery", "conditioning", "cardio"],
@@ -913,6 +918,7 @@ def create_app(port: int | None = None) -> Flask:
         BUILD_DATE=BUILD_DATE,
         GIT_HASH=git_hash(),
         FIRST_CHECK={"ok": True, "message": ""},
+        ENABLE_AUTH=env_flag_true(os.getenv("ENABLE_AUTH")),
         ENABLE_AUTH=str(os.getenv("ENABLE_AUTH", "false")).lower() == "true",
     )
     app.secret_key = os.getenv("SECRET_KEY", "flowform-dev-secret")
@@ -939,6 +945,23 @@ def create_app(port: int | None = None) -> Flask:
         def wrapped(*args, **kwargs):
             if not auth_enabled():
                 return view(*args, **kwargs)
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
             connection = sqlite3.connect(db_path)
             uid = current_user_id(connection)
             connection.close()
@@ -1010,6 +1033,71 @@ def create_app(port: int | None = None) -> Flask:
             return render_template("first_run_error.html", error_message=check.get("message", "Unknown startup check failure")), 500
         if auth_enabled() and not session.get("user_id"):
             return redirect(url_for("login_page"))
+        return redirect(url_for("ready"))
+
+    @app.get("/signup")
+    def signup_page():
+        if not auth_enabled():
+            return render_template("signup.html", auth_disabled_note=True)
+        return render_template("signup.html", auth_disabled_note=False)
+
+    @app.post("/signup")
+    def signup_submit():
+        if not auth_enabled():
+            return render_template("signup.html", auth_disabled_note=True, error="Auth disabled."), 200
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        display_name = str(request.form.get("display_name", "")).strip() or "User"
+        if not email or not password:
+            return render_template("signup.html", error="Email and password are required."), 400
+
+        connection = sqlite3.connect(db_path)
+        exists = connection.execute("SELECT id FROM users WHERE lower(email) = ?", (email,)).fetchone()
+        if exists:
+            connection.close()
+            return render_template("signup.html", error="Email already registered."), 400
+        now = utc_now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO users (email, display_name, password_hash, role, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, 'member', 1, ?, ?)
+            """,
+            (email, display_name, generate_password_hash(password), now, now),
+        )
+        user_id = int(cursor.lastrowid)
+        ensure_subscription_row(connection, user_id)
+        connection.commit()
+        connection.close()
+        session["user_id"] = user_id
+        return redirect(url_for("ready"))
+
+    @app.get("/login")
+    def login_page():
+        if not auth_enabled():
+            return render_template("login.html", auth_disabled_note=True)
+        return render_template("login.html", auth_disabled_note=False)
+
+    @app.post("/login")
+    def login_submit():
+        if not auth_enabled():
+            return render_template("login.html", auth_disabled_note=True, error="Auth disabled."), 200
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        connection = sqlite3.connect(db_path)
+        row = connection.execute(
+            "SELECT id, password_hash, enabled FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+        connection.close()
+        if (not row) or int(row[2]) == 0 or not check_password_hash(str(row[1] or ""), password):
+            return render_template("login.html", error="Invalid credentials."), 401
+        session["user_id"] = int(row[0])
+        return redirect(url_for("ready"))
+
+    @app.get("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login_page") if auth_enabled() else url_for("ready"))
         return render_template("ready.html")
 
     @app.get("/signup")

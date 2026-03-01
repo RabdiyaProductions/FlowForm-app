@@ -18,6 +18,29 @@ def test_ready_and_health():
     assert b'/api/health' in ready.data
 
 
+def test_auth_unset_root_does_not_redirect_to_login(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'unset-auth.db'))
+    monkeypatch.delenv('ENABLE_AUTH', raising=False)
+    app = create_app(port=5430)
+    client = app.test_client()
+
+    root = client.get('/', follow_redirects=True)
+    assert root.status_code == 200
+    assert b'System Ready' in root.data
+    assert b'Login' not in root.data
+
+
+def test_auth_enabled_protected_route_redirects_to_login(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'auth-on.db'))
+    monkeypatch.setenv('ENABLE_AUTH', 'true')
+    app = create_app(port=5431)
+    client = app.test_client()
+
+    resp = client.get('/plan/current', follow_redirects=False)
+    assert resp.status_code in (301, 302)
+    assert '/login' in resp.headers.get('Location', '')
+
+
 def test_cli_port_overrides_env_port(monkeypatch):
     monkeypatch.setenv('PORT', '5488')
     app = create_app(port=5444)
