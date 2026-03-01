@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import hashlib
 import os
 import sqlite3
 import subprocess
@@ -293,6 +294,17 @@ def apply_schema_migrations(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         )
         """
     )
@@ -1035,6 +1047,29 @@ def validate_backup_zip_names(names: set[str]) -> tuple[bool, str]:
         return False, "unexpected_zip_entry"
     return True, "ok"
 
+
+def build_zip_manifest(file_payloads: dict[str, bytes]) -> dict:
+    files = []
+    for path in sorted(file_payloads.keys()):
+        blob = file_payloads[path]
+        files.append({
+            "path": path,
+            "bytes": len(blob),
+            "sha256": hashlib.sha256(blob).hexdigest(),
+        })
+    return {
+        "created_at": utc_now_iso(),
+        "files": files,
+    }
+
+
+def normalize_issue_ref(raw: str | None) -> str:
+    if raw is None:
+        return "FLOWFORM-LOCAL"
+    value = str(raw).strip()
+    return value or "FLOWFORM-LOCAL"
+
+
 def create_app(port: int | None = None) -> Flask:
     load_env_file(ROOT_DIR / ".env")
     configure_logging()
@@ -1065,6 +1100,24 @@ def create_app(port: int | None = None) -> Flask:
     def auth_enabled() -> bool:
         return bool(app.config.get("ENABLE_AUTH", False))
 
+    def project_is_approved(connection: sqlite3.Connection) -> bool:
+        row = connection.execute("SELECT value FROM app_state WHERE key = 'project_approved' LIMIT 1").fetchone()
+        if not row:
+            return False
+        return env_flag_true(row[0])
+
+    def set_project_approved(connection: sqlite3.Connection, approved: bool) -> None:
+        now = utc_now_iso()
+        value = "true" if approved else "false"
+        connection.execute(
+            """
+            INSERT INTO app_state (key, value, created_at, updated_at)
+            VALUES ('project_approved', ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (value, now, now),
+        )
+
     def current_user_id(connection: sqlite3.Connection) -> int:
         if not auth_enabled():
             return get_or_create_founder_user(connection)
@@ -1082,6 +1135,24 @@ def create_app(port: int | None = None) -> Flask:
         def wrapped(*args, **kwargs):
             if not auth_enabled():
                 return view(*args, **kwargs)
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+
             connection = sqlite3.connect(db_path)
             uid = current_user_id(connection)
             connection.close()
@@ -1789,6 +1860,22 @@ def create_app(port: int | None = None) -> Flask:
     @require_login
     def templates_catalog():
         connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+
+        limit_templates = None
+        if user_id > 0 and not has_paid_access(connection, user_id):
+            limit_templates = 3
+
+        sql = """
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
+        """
+        if limit_templates is not None:
+            sql += f"\nLIMIT {int(limit_templates)}"
+
+        rows = connection.execute(sql).fetchall()
         user_id = current_user_id(connection)
         limit_clause = ""
         if user_id > 0 and not has_paid_access(connection, user_id):
@@ -1819,6 +1906,9 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+        snapshot = analytics_snapshot(connection, user_id)
+        connection.close()
+        return render_template("analytics.html", analytics=snapshot)
         data = analytics_snapshot(connection, user_id)
         connection.close()
         return render_template("analytics.html", analytics=data)
@@ -2117,8 +2207,464 @@ def create_app(port: int | None = None) -> Flask:
         return jsonify({"ok": True, "route": "/api/critic/run"})
 
     @app.post("/api/approve")
+    @require_login
     def api_approve():
-        return jsonify({"ok": True, "route": "/api/approve"})
+        payload = request.get_json(silent=True) or request.form.to_dict() or {}
+        approved = env_flag_true(str(payload.get("approved", "true")))
+
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        set_project_approved(connection, approved)
+        write_audit(connection, "project_approval_updated", {"approved": approved, "user_id": user_id})
+        connection.commit()
+        connection.close()
+
+        return jsonify({"ok": True, "approved": approved, "route": "/api/approve"})
+
+    @app.get("/exports")
+    @require_login
+    def exports_page():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+
+        plan = connection.execute(
+            """
+            SELECT id, name
+            FROM plan
+            WHERE user_id = ?
+            ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        completion = connection.execute(
+            """
+            SELECT sc.id
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            JOIN plan p ON p.id = pd.plan_id
+            WHERE p.user_id = ?
+            ORDER BY sc.id DESC
+            LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        connection.close()
+
+        return render_template(
+            "exports.html",
+            current_plan_id=int(plan["id"]) if plan else None,
+            current_plan_name=(plan["name"] if plan else None),
+            latest_completion_id=int(completion["id"]) if completion else None,
+        )
+
+    @app.get("/restore")
+    @require_login
+    def restore_page():
+        return render_template("restore.html")
+
+    @app.get("/api/export/plan")
+    @require_login
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        html = render_plan_export_html(payload)
+        response = make_response(html)
+        response.headers["Content-Type"] = "text/html; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_plan_export.html"
+        return response
+
+    @app.get("/api/export/history.csv")
+    @require_login
+    def api_export_history_csv():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+
+        completions = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.week, pd.day_index, pd.title
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            JOIN plan p ON p.id = pd.plan_id
+            WHERE p.user_id = ?
+            ORDER BY sc.completed_at DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        recovery = connection.execute(
+            """
+            SELECT id, date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
+            FROM recovery_checkin
+            WHERE user_id = ?
+            ORDER BY date DESC
+            """,
+            (user_id,),
+        ).fetchall()
+        connection.close()
+
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        writer.writerow(["section", "id", "date", "week", "day", "title", "rpe", "minutes_done", "sleep_hours", "stress", "soreness", "mood", "notes"])
+        for row in completions:
+            writer.writerow([
+                "completion",
+                row["id"],
+                row["completed_at"],
+                row["week"],
+                row["day_index"],
+                row["title"] or "",
+                row["rpe"],
+                row["minutes_done"],
+                "", "", "", "",
+                row["notes"] or "",
+            ])
+        for row in recovery:
+            writer.writerow([
+                "recovery",
+                row["id"],
+                row["date"],
+                "", "", "", "", "",
+                row["sleep_hours"],
+                row["stress_1_10"],
+                row["soreness_1_10"],
+                row["mood_1_10"],
+                row["notes"] or "",
+            ])
+
+        response = make_response(stream.getvalue())
+        response.headers["Content-Type"] = "text/csv; charset=utf-8"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_history.csv"
+        return response
+
+    @app.get("/api/export/json")
+    @require_login
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        payload = export_snapshot(connection, user_id)
+        connection.close()
+
+        response = make_response(json.dumps(payload, indent=2))
+        response.headers["Content-Type"] = "application/json"
+        response.headers["Content-Disposition"] = "attachment; filename=flowform_backup.json"
+        return response
+
+    @app.get("/api/export/zip")
+    @require_login
+    def api_export_zip():
+        force = env_flag_true(request.args.get("force"))
+        issue_ref = normalize_issue_ref(request.args.get("issue_ref"))
+
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        approved = project_is_approved(connection)
+        if not approved and not force:
+            connection.close()
+            return jsonify({
+                "ok": False,
+                "error": "project_not_approved",
+                "message": "Project must be approved before export. Call POST /api/approve or retry with ?force=true.",
+            }), 403
+
+        payload = export_snapshot(connection, user_id)
+        active_plan = payload.get("plan") or {}
+        plan_id = active_plan.get("id")
+        template_count = len(payload.get("templates") or [])
+        plan_day_count = len(payload.get("plan_days") or [])
+        completion_count = len(payload.get("completions") or [])
+        recovery_count = len(payload.get("recovery") or [])
+
+        project_payload = {
+            "app": app.config.get("APP_NAME"),
+            "version": app.config.get("VERSION"),
+            "issue_ref": issue_ref,
+            "approved": approved,
+            "exported_at": utc_now_iso(),
+            "project": {
+                "plan_id": plan_id,
+                "plan_name": active_plan.get("name"),
+                "status": active_plan.get("status"),
+            },
+        }
+        pilot_pack_payload = {
+            "issue_ref": issue_ref,
+            "plan": active_plan,
+            "profile": payload.get("profile") or {},
+            "plan_days": payload.get("plan_days") or [],
+            "templates": payload.get("templates") or [],
+            "completions": payload.get("completions") or [],
+            "recovery": payload.get("recovery") or [],
+        }
+        export_meta_payload = {
+            "exported_at": utc_now_iso(),
+            "export_type": "studio_hub_zip",
+            "approved": approved,
+            "force": force,
+            "issue_ref": issue_ref,
+            "counts": {
+                "templates": template_count,
+                "plan_days": plan_day_count,
+                "completions": completion_count,
+                "recovery": recovery_count,
+            },
+            "app": {
+                "name": app.config.get("APP_NAME"),
+                "version": app.config.get("VERSION"),
+                "git_hash": app.config.get("GIT_HASH"),
+            },
+        }
+        workflow_markdown = """# Workflow
+
+1. Open `project.json` to identify pack metadata and approval state.
+2. Load `pilot_pack.json` for plan days, templates, completions, and recovery records.
+3. Verify all file hashes using `manifest.json` before import.
+4. Use `export_meta.json` for export provenance, app version, and row counts.
+5. Read `issue_ref.txt` to map this bundle to the upstream issue/work item.
+"""
+
+        file_payloads: dict[str, bytes] = {
+            "issue_ref.txt": (issue_ref + "\n").encode("utf-8"),
+            "project.json": json.dumps(project_payload, indent=2).encode("utf-8"),
+            "pilot_pack.json": json.dumps(pilot_pack_payload, indent=2).encode("utf-8"),
+            "export_meta.json": json.dumps(export_meta_payload, indent=2).encode("utf-8"),
+            "WORKFLOW.md": workflow_markdown.encode("utf-8"),
+        }
+        manifest = build_zip_manifest(file_payloads)
+        manifest["files"].append({"path": "manifest.json", "bytes": 0, "sha256": ""})
+        manifest_blob = json.dumps(manifest, indent=2).encode("utf-8")
+        manifest["files"][-1] = {
+            "path": "manifest.json",
+            "bytes": len(manifest_blob),
+            "sha256": hashlib.sha256(manifest_blob).hexdigest(),
+        }
+        file_payloads["manifest.json"] = json.dumps(manifest, indent=2).encode("utf-8")
+
+        write_audit(connection, "export_zip", {
+            "approved": approved,
+            "force": force,
+            "issue_ref": issue_ref,
+            "files": sorted(file_payloads.keys()),
+        })
+        connection.commit()
+        connection.close()
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path, blob in file_payloads.items():
+                zf.writestr(path, blob)
+        memory.seek(0)
+
+        return send_file(
+            memory,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="flowform_export_bundle.zip",
+        )
+
+    @app.get("/api/export/backup")
+    @require_login
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        payload = export_snapshot(connection, user_id)
+        manifest = backup_manifest(connection)
+        connection.close()
+
+        settings_payload = {
+            "app_name": app.config.get("APP_NAME"),
+            "version": app.config.get("VERSION"),
+            "port": app.config.get("PORT"),
+            "build_date": app.config.get("BUILD_DATE"),
+        }
+
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if Path(app.config["DB_PATH"]).exists():
+                zf.write(app.config["DB_PATH"], arcname="flowform.db")
+            zf.writestr("flowform_backup.json", json.dumps(payload, indent=2))
+            zf.writestr("settings.json", json.dumps(settings_payload, indent=2))
+            zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+            if MEDIA_DIR.exists():
+                for item in MEDIA_DIR.iterdir():
+                    if item.is_file():
+                        zf.write(item, arcname=f"media/{item.name}")
+        memory.seek(0)
+        return send_file(memory, mimetype="application/zip", as_attachment=True, download_name="flowform_full_backup.zip")
+
+    @app.get("/api/export/plan_pdf/<int:plan_id>")
+    @require_login
+    def api_export_plan_pdf(plan_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        plan = connection.execute("SELECT id, name, start_date, weeks, status FROM plan WHERE id = ?", (plan_id,)).fetchone()
+        if plan is None:
+            connection.close()
+            return jsonify({"error": "plan_not_found"}), 404
+        days = connection.execute(
+            """
+            SELECT pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
+            ORDER BY pd.week ASC, pd.day_index ASC
+            """,
+            (plan_id,),
+        ).fetchall()
+        connection.close()
+
+        lines = [
+            f"Plan: {plan['name']} (status: {plan['status']})",
+            f"Start: {plan['start_date']} | Weeks: {plan['weeks']}",
+            "",
+            "4-week schedule:",
+        ]
+        for row in days:
+            lines.append(
+                f"W{row['week']} D{row['day_index']} | {row['title'] or row['template_name'] or 'Session'} | {row['discipline'] or '-'} | {row['duration_minutes'] or 0} min"
+            )
+        pdf = build_simple_pdf(lines, title="FlowForm Plan PDF Export")
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_plan_{plan_id}.pdf")
+
+    @app.get("/api/export/session_summary/<int:completion_id>")
+    @require_login
+    def api_export_session_summary_pdf(completion_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            """
+            SELECT sc.id, sc.completed_at, sc.rpe, sc.notes, sc.minutes_done,
+                   pd.title, pd.week, pd.day_index, st.name AS template_name, st.json_blocks
+            FROM session_completion sc
+            JOIN plan_day pd ON pd.id = sc.plan_day_id
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE sc.id = ?
+            """,
+            (completion_id,),
+        ).fetchone()
+        connection.close()
+        if row is None:
+            return jsonify({"error": "completion_not_found"}), 404
+
+        blocks = blocks_from_json(row["json_blocks"] or "")
+        lines = [
+            f"Session title: {row['title'] or row['template_name'] or 'Session'}",
+            f"Completed at: {row['completed_at']}",
+            f"Week/Day: W{row['week']} D{row['day_index']}",
+            f"RPE: {row['rpe']} | Minutes: {row['minutes_done']}",
+            f"Notes: {row['notes'] or ''}",
+            "",
+            "Blocks:",
+        ]
+        for block in blocks:
+            lines.append(f"- {block.get('name', 'Block')} ({block.get('minutes', 0)} min)")
+        pdf = build_simple_pdf(lines, title="FlowForm Session Summary PDF")
+        return send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=f"flowform_session_{completion_id}.pdf")
+
+    @app.post("/api/import/backup")
+    @require_login
+    def api_import_backup():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"ok": False, "error": "file_required"}), 400
+
+        should_confirm = str((request.form.get("confirm_overwrite") or "false")).lower() in {"true", "1", "yes"}
+        raw = upload.read()
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile:
+            return jsonify({"ok": False, "error": "invalid_zip"}), 400
+
+        names = set(zf.namelist())
+        ok, error_code = validate_backup_zip_names(names)
+        if not ok:
+            return jsonify({"ok": False, "error": error_code, "message": "Backup ZIP contains invalid or unsafe paths."}), 400
+
+        manifest = {}
+        if "manifest.json" in names:
+            try:
+                manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+            except Exception:
+                manifest = {}
+
+        summary = {
+            "plans": int((manifest.get("counts") or {}).get("plans", 0)),
+            "templates": int((manifest.get("counts") or {}).get("templates", 0)),
+            "completions": int((manifest.get("counts") or {}).get("completions", 0)),
+            "recovery": int((manifest.get("counts") or {}).get("recovery", 0)),
+            "media_files": int(manifest.get("media_files", 0)),
+            "warning": "Restoring this backup will overwrite current data.",
+        }
+
+        if not should_confirm:
+            return jsonify({"ok": True, "requires_confirmation": True, "summary": summary})
+
+        db_target = Path(app.config["DB_PATH"])
+        db_target.parent.mkdir(parents=True, exist_ok=True)
+        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="flowform-restore-"))
+        stage_db = temp_dir / "flowform.db"
+        stage_media = temp_dir / "media"
+        stage_media.mkdir(exist_ok=True)
+        old_db = db_target.with_suffix(".pre_restore.bak")
+        old_media = MEDIA_DIR.parent / "media_pre_restore"
+
+        try:
+            stage_db.write_bytes(zf.read("flowform.db"))
+            for name in names:
+                if name.startswith("media/") and not name.endswith("/"):
+                    out = stage_media / Path(name).name
+                    out.write_bytes(zf.read(name))
+
+            probe = sqlite3.connect(stage_db)
+            required = {"plan", "plan_day", "session_template", "session_completion", "recovery_checkin"}
+            existing = {r[0] for r in probe.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            probe.close()
+            if not required.issubset(existing):
+                raise ValueError("backup_database_schema_invalid")
+
+            if db_target.exists():
+                shutil.copy2(db_target, old_db)
+
+            tmp_live_db = db_target.with_suffix(".restore_tmp")
+            shutil.copy2(stage_db, tmp_live_db)
+            tmp_live_db.replace(db_target)
+
+            if old_media.exists():
+                shutil.rmtree(old_media)
+            if MEDIA_DIR.exists():
+                MEDIA_DIR.replace(old_media)
+            shutil.copytree(stage_media, MEDIA_DIR, dirs_exist_ok=True)
+            if old_media.exists():
+                shutil.rmtree(old_media)
+            if old_db.exists():
+                old_db.unlink(missing_ok=True)
+
+        except Exception as exc:
+            if old_db.exists():
+                try:
+                    shutil.copy2(old_db, db_target)
+                except Exception:
+                    pass
+            if old_media.exists():
+                try:
+                    if MEDIA_DIR.exists():
+                        shutil.rmtree(MEDIA_DIR)
+                    old_media.replace(MEDIA_DIR)
+                except Exception:
+                    pass
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"ok": False, "error": "restore_failed", "message": str(exc)}), 400
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({"ok": True, "restored": summary})
 
     @app.get("/exports")
     @require_login

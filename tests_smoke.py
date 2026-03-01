@@ -1,3 +1,4 @@
+from pathlib import Path
 from app_server import create_app
 
 
@@ -293,6 +294,7 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
         'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
     })
 
+    import sqlite3, json as _json, zipfile, io, hashlib
     import sqlite3, json as _json, zipfile, io
     con = sqlite3.connect(app.config['DB_PATH'])
     plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
@@ -315,6 +317,7 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
     exports_page = client.get('/exports')
     assert exports_page.status_code == 200
     assert b'Download Full Backup JSON' in exports_page.data
+    assert b'Export Current Plan (PDF)' in exports_page.data
 
     plan_html = client.get('/api/export/plan')
     assert plan_html.status_code == 200
@@ -328,6 +331,40 @@ def test_exports_downloads_include_required_data(tmp_path, monkeypatch):
     assert len(payload['completions']) > 0
     assert len(payload['recovery']) > 0
 
+    blocked = client.get('/api/export/zip')
+    assert blocked.status_code == 403
+    assert blocked.get_json()['error'] == 'project_not_approved'
+
+    bundle = client.get('/api/export/zip?force=true&issue_ref=FLOW-123')
+    assert bundle.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(bundle.data))
+    names = set(zf.namelist())
+    required = {
+        'issue_ref.txt',
+        'project.json',
+        'pilot_pack.json',
+        'export_meta.json',
+        'WORKFLOW.md',
+        'manifest.json',
+    }
+    assert required.issubset(names)
+
+    manifest = _json.loads(zf.read('manifest.json').decode('utf-8'))
+    manifest_paths = {row['path'] for row in manifest['files']}
+    assert names == manifest_paths
+    assert 'export_meta.json' in manifest_paths
+
+    by_path = {row['path']: row for row in manifest['files']}
+    for item in names:
+        row = by_path[item]
+        assert 'bytes' in row
+        assert 'sha256' in row
+        assert isinstance(row['bytes'], int)
+        assert len(row['sha256']) == 64
+        if item != 'manifest.json':
+            raw = zf.read(item)
+            assert row['bytes'] == len(raw)
+            assert row['sha256'] == hashlib.sha256(raw).hexdigest()
     bundle = client.get('/api/export/zip')
     assert bundle.status_code == 200
     zf = zipfile.ZipFile(io.BytesIO(bundle.data))
@@ -687,3 +724,107 @@ def test_assistant_escalation_and_history_cap(tmp_path, monkeypatch):
     count = con.execute('SELECT COUNT(*) FROM assistant_message').fetchone()[0]
     con.close()
     assert count == 20
+
+
+def test_export_zip_after_approval_succeeds_without_force(tmp_path, monkeypatch):
+    import io
+    import json as _json
+    import zipfile
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'approval.db'))
+    app = create_app(port=5416)
+    client = app.test_client()
+
+    first_try = client.get('/api/export/zip')
+    assert first_try.status_code == 403
+
+    approve = client.post('/api/approve', json={'approved': True})
+    assert approve.status_code == 200
+    assert approve.get_json()['approved'] is True
+
+    bundle = client.get('/api/export/zip')
+    assert bundle.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(bundle.data))
+    export_meta = _json.loads(zf.read('export_meta.json').decode('utf-8'))
+    assert export_meta['approved'] is True
+    assert export_meta['force'] is False
+
+
+def test_backup_restore_drill_recovers_plan_completion_and_recovery(tmp_path, monkeypatch):
+    import io
+    import sqlite3
+
+    db_path = tmp_path / 'drill.db'
+    monkeypatch.setenv('DB_PATH', str(db_path))
+    app = create_app(port=5440)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    con = sqlite3.connect(app.config['DB_PATH'])
+    plan_day_id = con.execute('SELECT id FROM plan_day ORDER BY id LIMIT 1').fetchone()[0]
+    con.close()
+
+    done = client.post('/api/session/finish', json={
+        'plan_day_id': plan_day_id,
+        'rpe': 6,
+        'notes': 'drill',
+        'minutes_done': 42,
+    })
+    assert done.status_code == 200
+
+    checkin = client.post('/api/recovery/checkin', json={
+        'date': '2026-03-03',
+        'sleep_hours': 7.5,
+        'stress_1_10': 4,
+        'soreness_1_10': 3,
+        'mood_1_10': 8,
+        'notes': 'steady'
+    })
+    assert checkin.status_code == 200
+
+    backup = client.get('/api/export/backup')
+    assert backup.status_code == 200
+
+    db_file = Path(app.config['DB_PATH'])
+    db_file.unlink()
+
+    health_after_wipe = client.get('/api/health')
+    assert health_after_wipe.status_code == 200
+
+    preview = client.post(
+        '/api/import/backup',
+        data={'file': (io.BytesIO(backup.data), 'backup.zip')},
+        content_type='multipart/form-data',
+    )
+    assert preview.status_code == 200
+    assert preview.get_json()['requires_confirmation'] is True
+
+    restore = client.post(
+        '/api/import/backup',
+        data={
+            'file': (io.BytesIO(backup.data), 'backup.zip'),
+            'confirm_overwrite': 'true',
+        },
+        content_type='multipart/form-data',
+    )
+    assert restore.status_code == 200
+    assert restore.get_json()['ok'] is True
+
+    con2 = sqlite3.connect(app.config['DB_PATH'])
+    counts = {
+        'plan': con2.execute('SELECT COUNT(*) FROM plan').fetchone()[0],
+        'completion': con2.execute('SELECT COUNT(*) FROM session_completion').fetchone()[0],
+        'recovery': con2.execute('SELECT COUNT(*) FROM recovery_checkin').fetchone()[0],
+    }
+    con2.close()
+
+    assert counts['plan'] >= 1
+    assert counts['completion'] >= 1
+    assert counts['recovery'] >= 1

@@ -81,11 +81,15 @@ Behavior:
 - returns ZIP containing:
   - `flowform.db` (SQLite database),
   - `flowform_backup.json` (full JSON snapshot),
+  - `settings.json` (runtime settings snapshot with app version/build metadata),
   - `settings.json` (runtime settings snapshot),
   - `manifest.json` (counts summary + warning),
 - `media/*` files from `instance/media/`.
 - Exports page includes:
   - **Download Full Backup (ZIP)**,
+  - **Export Current Plan (PDF)** one-click button when a plan exists,
+  - **Download Plan HTML**,
+  - **Export History (CSV)** via `GET /api/export/history.csv`.
   - **Export Plan (PDF/HTML)**,
   - **Export History (CSV)** via `GET /api/export/history.csv`.
   - `media/*` files from `instance/media/`.
@@ -123,6 +127,14 @@ Behavior:
 
 #### Existing JSON export remains
 - `GET /api/export/json` still returns full JSON backup for programmatic use.
+
+
+#### Studio Hub ZIP contract: `GET /api/export/zip`
+Behavior:
+- export is blocked by default until project approval (`POST /api/approve`) unless `?force=true` is passed,
+- ZIP always includes: `issue_ref.txt`, `project.json`, `pilot_pack.json`, `export_meta.json`, `WORKFLOW.md`, `manifest.json`,
+- `manifest.json` lists every file in the ZIP with `path`, `bytes`, and `sha256` for downstream validation,
+- `issue_ref` can be set with query arg (`/api/export/zip?issue_ref=FLOW-123`).
 
 ---
 

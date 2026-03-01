@@ -102,6 +102,11 @@ Exact click steps:
 - successful restore replaces current DB/media with backup state.
 
 Recovery drill:
+1. Create a plan, complete one session, and submit one recovery check-in.
+2. Backup from `/exports` using **Download Full Backup (ZIP)**.
+3. Stop app and remove/rename local DB file.
+4. Start app, open `/restore`, preview summary, confirm restore.
+5. Open `/plan/current` and verify plan/completion/recovery data reappears.
 1. Backup from `/exports`.
 2. Stop app and remove/rename local DB file.
 3. Start app, open `/restore`, preview summary, confirm restore.
@@ -153,3 +158,17 @@ Recovery drill:
 **Accept if**
 - no login/signup required,
 - single-founder flow remains functional.
+
+
+## Journey 13 — Studio Hub ZIP contract is complete and gated
+**Steps**
+1. Attempt `GET /api/export/zip` before approval.
+2. Confirm request is blocked with a clear approval message.
+3. Approve via `POST /api/approve` (or retry with `?force=true`).
+4. Download ZIP and inspect files + manifest.
+
+**Accept if**
+- unapproved export returns `project_not_approved` and guidance to approve or force,
+- ZIP always includes `issue_ref.txt`, `project.json`, `pilot_pack.json`, `export_meta.json`, `WORKFLOW.md`, `manifest.json`,
+- `manifest.json` includes every ZIP file and includes `export_meta.json`,
+- each manifest item includes `path`, `bytes`, and `sha256`.
