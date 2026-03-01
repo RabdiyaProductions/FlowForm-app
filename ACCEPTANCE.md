@@ -107,6 +107,10 @@ Recovery drill:
 3. Stop app and remove/rename local DB file.
 4. Start app, open `/restore`, preview summary, confirm restore.
 5. Open `/plan/current` and verify plan/completion/recovery data reappears.
+1. Backup from `/exports`.
+2. Stop app and remove/rename local DB file.
+3. Start app, open `/restore`, preview summary, confirm restore.
+4. Open `/plan/current` and verify plan/completion/recovery data reappears.
 
 
 ## Journey 9 — PDF exports are readable and complete

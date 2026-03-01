@@ -10,4 +10,7 @@ if not exist "%VENV_PY%" (
 "%VENV_PY%" "%ROOT%tools\check_structure.py"
 if errorlevel 1 exit /b %errorlevel%
 "%VENV_PY%" "%ROOT%tools\run_full_tests.py"
+python "%ROOT%tools\check_structure.py"
+if errorlevel 1 exit /b %errorlevel%
+python "%ROOT%tools\run_full_tests.py"
 exit /b %errorlevel%

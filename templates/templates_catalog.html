@@ -8,6 +8,10 @@
 <div class="card">
   <table>
     <thead><tr><th>Name</th><th>Discipline</th><th>Minutes</th><th>Level</th><th>Actions</th></tr></thead>
+</div>
+<div class="card">
+  <table>
+    <thead><tr><th>Name</th><th>Discipline</th><th>Minutes</th><th>Level</th></tr></thead>
     <tbody>
       {% for t in templates %}
       <tr>
@@ -19,6 +23,9 @@
       </tr>
       {% else %}
       <tr><td colspan="5">No templates found.</td></tr>
+      </tr>
+      {% else %}
+      <tr><td colspan="4">No templates found.</td></tr>
       {% endfor %}
     </tbody>
   </table>

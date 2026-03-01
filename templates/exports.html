@@ -26,6 +26,14 @@
     {% else %}
       <li><strong>Current plan PDF:</strong> create a plan first to enable one-click plan PDF export.</li>
     {% endif %}
+    <a class="btn" href="/api/export/backup">Download full backup</a>
+    <a class="btn" href="/api/export/plan">Download Plan HTML</a>
+    <a class="btn" href="/api/export/json">Download Full Backup JSON</a>
+    <a class="btn" href="/api/export/zip">Download ZIP Bundle</a>
+  </div>
+  <ul>
+    <li><strong>Full backup:</strong> SQLite DB + JSON snapshot + settings + media files.</li>
+    <li><strong>Backup JSON:</strong> includes plan, templates, completions, recovery.</li>
   </ul>
 </div>
 
@@ -38,6 +46,14 @@
 
   <label style="margin-top:8px;">Completion ID</label>
   <input type="number" id="completionId" min="1" placeholder="e.g. 1" value="{{ latest_completion_id or '' }}" />
+  <h2>PDF Exports</h2>
+  <p class="muted">Export Plan (PDF/HTML) for the current plan.</p>
+  <label>Plan ID</label>
+  <input type="number" id="planId" min="1" placeholder="e.g. 1" />
+  <button class="btn" id="planPdfBtn" type="button">Download plan PDF</button>
+
+  <label style="margin-top:8px;">Completion ID</label>
+  <input type="number" id="completionId" min="1" placeholder="e.g. 1" />
   <button class="btn" id="sessionPdfBtn" type="button">Download session summary PDF</button>
 </div>
 
@@ -56,4 +72,9 @@ document.getElementById('sessionPdfBtn').addEventListener('click', () => {
   }
 });
 </script>
+    <li><strong>Plan HTML:</strong> printable plan + completion status.</li>
+    <li><strong>Backup JSON:</strong> includes plan, templates, completions, recovery.</li>
+    <li><strong>ZIP Bundle:</strong> DB + JSON + plan HTML.</li>
+  </ul>
+</div>
 {% endblock %}

@@ -44,6 +44,15 @@
       <a href="/login">Login</a>
       <a href="/signup">Sign up</a>
       {% endif %}
+      {% if auth_enabled and current_session_user_id %}
+      <a href="/admin">Admin</a>
+      <a href="/logout">Logout</a>
+      {% elif auth_enabled %}
+      <a href="/login">Login</a>
+      <a href="/signup">Sign up</a>
+      {% endif %}
+      <a href="/exports">Exports</a>
+      <a href="/restore">Restore</a>
     </nav>
     {% block content %}{% endblock %}
   </div>
