@@ -5,73 +5,65 @@ This file defines the **top 5 founder journeys** against what is currently imple
 ## Journey 1 — First setup to first ready screen
 **Goal:** Fresh machine can install and boot deterministically.
 
-**Steps**
+**Click steps**
 1. Run `00_setup_all.bat` (or `_BAT/1_setup.bat`).
 2. Run `01_run_all.bat` (or `_BAT/2_run.bat`).
-3. Open `/ready`.
+3. Open `/ready` in browser.
 
 **Accept if**
 - venv and dependencies install successfully.
 - server starts on resolved port.
 - `/ready` returns HTTP 200 and renders the ready template.
 
-## Journey 2 — Founder checks operational health
-**Goal:** Confirm app health before demos.
+## Journey 2 — Founder creates a 4-week plan from wizard
+**Goal:** Build and persist a plan from UI inputs.
 
-**Steps**
-1. Visit `/health`.
-2. Visit `/api/health`.
-3. Visit `/diagnostics`.
-
-**Accept if**
-- `/health` includes `status`, `version`, `time`, `db_ok`, `provider_status`.
-- `/api/health` returns status + db state.
-- `/diagnostics` returns `PASS` and no missing required routes.
-
-## Journey 3 — Founder validates product contract
-**Goal:** Verify route surface matches expected CCE-flat API contract.
-
-**Steps**
-1. Call `/api/spec`.
-2. Review route list and method signatures.
+**Click steps**
+1. Open `/plan/wizard`.
+2. Select goal (`strength`, `fat_loss`, `mobility`, `stress`, or `hybrid`).
+3. Set days/week (2–6) and minutes/session (30–75).
+4. Rank 5 discipline preferences.
+5. Add injury flags, equipment, and constraints.
+6. Click **Create 4-week plan**.
 
 **Accept if**
-- Spec endpoint returns HTTP 200.
-- Core product routes are present (`timeline`, `critic`, `approve`, `import/export`, `projects`, `agents`).
+- Browser redirects to `/plan/current`.
+- New `plan` row is saved with `weeks=4` and `status=active`.
+- `plan_day` rows exist for all planned days.
 
-## Journey 4 — Founder smoke-tests orchestration endpoints
-**Goal:** Ensure command endpoints are callable even before full business logic is added.
+## Journey 3 — Founder reviews plan and today selection
+**Goal:** View the saved plan in calendar style and identify today.
 
-**Steps**
-1. POST each of:
-   - `/api/timeline/update`
-   - `/api/timeline/regenerate`
-   - `/api/timeline/apply_global`
-   - `/api/critic/run`
-   - `/api/approve`
-   - `/api/export`
-   - `/api/import`
-   - `/api/agents/enhance`
-2. GET `/api/projects/<code>` with a sample code.
+**Click steps**
+1. Open `/plan/current`.
+2. Review Week/Day table cards.
+3. Confirm row marked **Today**.
 
 **Accept if**
-- Endpoints return 200 with JSON acknowledgment payloads.
-- Project endpoint returns provided `<code>` in response.
+- Plan survives refresh (`/plan/current` still populated).
+- Week/day list is shown in calendar-style table layout.
+- Today’s week/day indicator appears.
 
-## Journey 5 — Founder runs repo guard + smoke suite
-**Goal:** Keep repo CCE-flat and prevent structural drift.
+## Journey 4 — Founder starts session or regenerates next week
+**Goal:** Use plan CTAs without losing completion history.
 
-**Steps**
-1. Run `_BAT/6_run_tests.bat`.
-2. (Equivalent) run `python tools/run_full_tests.py`.
+**Click steps**
+1. On `/plan/current`, click **Start today's session**.
+2. Return and click **Regenerate next week**.
 
 **Accept if**
-- `tools/check_structure.py` passes.
-- smoke tests pass.
-- run exits 0.
+- Start CTA is available from current plan view.
+- Regenerate CTA refreshes only the upcoming week schedule.
+- Completed sessions are not deleted during regeneration.
 
----
+## Journey 5 — Founder checks system health and guard rails
+**Goal:** Ensure readiness + structure safety.
 
-## Current non-goals (still true)
-- No committed MP4/render pipeline requirement.
-- Timeline/critic/import/export flows are currently stub acknowledgments, not full stateful workflow execution.
+**Click steps**
+1. Open `/health`, `/api/health`, and `/diagnostics`.
+2. Run `_BAT/6_run_tests.bat` (or `python tools/run_full_tests.py`).
+
+**Accept if**
+- `/api/health` returns `db_ok=true` and `template_count>0`.
+- `/diagnostics` shows `PASS`.
+- structure guard and smoke tests pass.
