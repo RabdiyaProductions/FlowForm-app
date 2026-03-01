@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+  <h1>Dashboard</h1>
+  <p class="muted">Structured training summary.</p>
+</div>
+
+<div class="card">
+  <p><strong>Total sessions:</strong> {{ total_sessions }}</p>
+  <p><strong>Weekly total minutes:</strong> {{ weekly_minutes }}</p>
+  <p><strong>Weekly training load:</strong> {{ weekly_load }}</p>
+  <p><strong>Current streak:</strong> {{ streak }} day{{ '' if streak == 1 else 's' }}</p>
+</div>
+
+<div class="card">
+  <h3>Last 5 sessions</h3>
+  <table>
+    <thead><tr><th>Title</th><th>Category</th><th>Intensity</th><th>Duration</th><th>Load</th><th>Status</th></tr></thead>
+    <tbody>
+      {% for s in last_sessions %}
+      <tr>
+        <td><a href="/sessions/{{ s['id'] }}">{{ s['title'] }}</a></td>
+        <td>{{ s['category'] }}</td>
+        <td>{{ s['intensity'] }}</td>
+        <td>{{ s['duration_minutes'] }} min</td>
+        <td>{{ s['training_load'] }}</td>
+        <td>{{ 'Completed' if s['completed_at'] else 'Pending' }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6">No sessions yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
