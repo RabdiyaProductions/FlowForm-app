@@ -629,3 +629,61 @@ def test_friendly_html_404():
     api = client.get('/api/no-such-route')
     assert api.status_code == 404
     assert api.get_json()['error'] == 'not_found'
+
+
+def test_assistant_fallback_without_api_key(tmp_path, monkeypatch):
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'assistant.db'))
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    app = create_app(port=5434)
+    client = app.test_client()
+
+    create = client.post('/api/plan/create', json={
+        'goal': 'hybrid',
+        'days_per_week': 3,
+        'minutes_per_session': 45,
+        'disciplines': ['strength', 'cardio', 'mobility', 'recovery', 'conditioning'],
+    })
+    assert create.status_code == 200
+
+    page = client.get('/assistant')
+    assert page.status_code == 200
+    assert b'Assistant Coach' in page.data
+
+    reply = client.post('/api/assistant/chat', json={
+        'action': 'recovery',
+        'message': 'How should I adjust today?',
+    })
+    assert reply.status_code == 200
+    payload = reply.get_json()
+    assert payload['ok'] is True
+    assert payload['mode'] in {'rules', 'escalation'}
+    assert 'digital coach' in payload['response'].lower()
+
+
+def test_assistant_escalation_and_history_cap(tmp_path, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv('DB_PATH', str(tmp_path / 'assistant-history.db'))
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    app = create_app(port=5435)
+    client = app.test_client()
+
+    risky = client.post('/api/assistant/chat', json={
+        'action': 'custom',
+        'message': 'I have severe chest pain and dizziness',
+    })
+    assert risky.status_code == 200
+    text = risky.get_json()['response'].lower()
+    assert 'medical advice' in text
+
+    for i in range(25):
+        client.post('/api/assistant/chat', json={'action': 'motivation', 'message': f'msg {i}'})
+
+    page = client.get('/assistant')
+    assert page.status_code == 200
+    assert b'last 20' in page.data.lower()
+
+    con = sqlite3.connect(app.config['DB_PATH'])
+    count = con.execute('SELECT COUNT(*) FROM assistant_message').fetchone()[0]
+    con.close()
+    assert count == 20

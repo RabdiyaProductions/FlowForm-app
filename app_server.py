@@ -11,6 +11,8 @@ import zipfile
 import tempfile
 import shutil
 import csv
+import urllib.request
+import urllib.error
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -273,6 +275,21 @@ def apply_schema_migrations(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'active',
             start_date TEXT,
             end_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS assistant_message (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            prompt TEXT NOT NULL,
+            response TEXT NOT NULL,
+            mode TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(user_id) REFERENCES users(id)
@@ -715,6 +732,116 @@ def analytics_snapshot(connection: sqlite3.Connection, user_id: int) -> dict:
     }
 
 
+def assistant_disclaimer() -> str:
+    return "I’m a digital coach, not a healthcare professional. This guidance is educational, not medical advice."
+
+
+def has_medical_risk_signal(text: str) -> bool:
+    needles = [
+        "injury", "injured", "severe", "chest pain", "faint", "fainted", "dizzy", "dizziness",
+        "bleeding", "concussion", "fracture", "cannot breathe", "shortness of breath",
+    ]
+    low = str(text or "").lower()
+    return any(n in low for n in needles)
+
+
+def assistant_context(connection: sqlite3.Connection, user_id: int) -> dict:
+    connection.row_factory = sqlite3.Row
+    plan = current_plan_record(connection, user_id)
+    profile = connection.execute(
+        "SELECT goal, days_per_week, minutes, equipment, constraints FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    recovery = connection.execute(
+        "SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes FROM recovery_checkin WHERE user_id = ? ORDER BY date DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    completions_7d = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM session_completion sc
+        JOIN plan_day pd ON pd.id = sc.plan_day_id
+        JOIN plan p ON p.id = pd.plan_id
+        WHERE p.user_id = ? AND sc.completed_at >= datetime('now', '-7 days')
+        """,
+        (user_id,),
+    ).fetchone()[0]
+
+    readiness = None
+    if recovery is not None:
+        score, explanation = compute_readiness_score(
+            float(recovery["sleep_hours"] or 0),
+            int(recovery["stress_1_10"] or 5),
+            int(recovery["soreness_1_10"] or 5),
+            int(recovery["mood_1_10"] or 5),
+        )
+        readiness = {"score": score, "label": readiness_label(score), "explanation": explanation}
+
+    return {
+        "plan": dict(plan) if plan else None,
+        "profile": dict(profile) if profile else None,
+        "recovery": dict(recovery) if recovery else None,
+        "completions_7d": int(completions_7d),
+        "readiness": readiness,
+    }
+
+
+def assistant_rules_reply(action: str, message: str, ctx: dict) -> tuple[str, str]:
+    if has_medical_risk_signal(message):
+        return (
+            "Your message suggests injury or severe symptoms. Consider seeking medical advice promptly. If symptoms are urgent or worsening, seek immediate care.",
+            "escalation",
+        )
+
+    readiness = (ctx.get("readiness") or {}).get("score")
+    goal = ((ctx.get("profile") or {}).get("goal") or "hybrid").replace("_", " ")
+    completions = int(ctx.get("completions_7d") or 0)
+
+    if action == "plan_tweak":
+        if readiness is not None and readiness < 55:
+            return ("Readiness looks low. Keep the next 1-2 sessions lighter, reduce volume by ~20%, and prioritize mobility/recovery.", "rules")
+        return (f"For your {goal} goal: keep core structure, add one progressive overload day, and one technique/recovery day this week.", "rules")
+    if action == "substitution":
+        if readiness is not None and readiness < 55:
+            return ("Suggested substitution: switch today to a 30-35 minute recovery/mobility template at RPE 4-5.", "rules")
+        return ("Suggested substitution: pick the same discipline with ~10% lower duration while maintaining form quality.", "rules")
+    if action == "recovery":
+        if readiness is not None and readiness < 55:
+            return ("Recovery advice: hydrate, optimize sleep tonight, and avoid max-effort work today.", "rules")
+        return ("Recovery advice: maintain sleep rhythm and complete planned work at controlled effort.", "rules")
+    if action == "motivation":
+        if completions >= 3:
+            return ("You’re building consistency—protect your streak with a focused, realistic session today.", "rules")
+        return ("Momentum starts small. Finish a short session today and let consistency compound.", "rules")
+
+    return ("I can help with plan tweaks, substitutions, recovery advice, and motivation using your recent plan/recovery context.", "rules")
+
+
+def assistant_llm_reply(api_key: str, action: str, message: str, ctx: dict) -> str:
+    system = (
+        "You are a concise fitness coach. Never provide medical diagnosis. "
+        "For injury/severe symptoms, advise seeking medical care. Provide practical, safe guidance in <=6 sentences."
+    )
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": json.dumps({"action": action, "message": message, "context": ctx}, ensure_ascii=False)},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 240,
+    }
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return str(data["choices"][0]["message"]["content"]).strip()
+
+
 def export_snapshot(connection: sqlite3.Connection, user_id: int) -> dict:
     connection.row_factory = sqlite3.Row
     plan = current_plan_record(connection, user_id)
@@ -955,6 +1082,23 @@ def create_app(port: int | None = None) -> Flask:
         def wrapped(*args, **kwargs):
             if not auth_enabled():
                 return view(*args, **kwargs)
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
             connection = sqlite3.connect(db_path)
             uid = current_user_id(connection)
             connection.close()
@@ -1675,6 +1819,79 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+        data = analytics_snapshot(connection, user_id)
+        connection.close()
+        return render_template("analytics.html", analytics=data)
+
+    @app.get("/assistant")
+    @require_login
+    def assistant_page():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        rows = connection.execute(
+            """
+            SELECT prompt, response, mode, created_at
+            FROM assistant_message
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT 20
+            """,
+            (user_id,),
+        ).fetchall()
+        connection.close()
+        return render_template("assistant.html", messages=[dict(r) for r in rows], disclaimer=assistant_disclaimer())
+
+    @app.post("/api/assistant/chat")
+    @require_login
+    def api_assistant_chat():
+        payload = request.get_json(silent=True) or request.form.to_dict()
+        message = str(payload.get("message", "")).strip()
+        action = str(payload.get("action", "custom")).strip()
+        if not message and action == "custom":
+            return jsonify({"ok": False, "error": "message_required"}), 400
+
+        connection = sqlite3.connect(db_path)
+        user_id = current_user_id(connection)
+        ctx = assistant_context(connection, user_id)
+        mode = "rules"
+
+        if has_medical_risk_signal(message):
+            body = "Your message suggests injury or severe symptoms. Consider seeking medical advice. If symptoms are urgent, seek immediate care."
+            mode = "escalation"
+        else:
+            api_key = os.getenv("OPENAI_API_KEY", "").strip()
+            if api_key:
+                try:
+                    body = assistant_llm_reply(api_key, action, message or action, ctx)
+                    mode = "llm"
+                except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, KeyError, ValueError, json.JSONDecodeError):
+                    body, mode = assistant_rules_reply(action, message, ctx)
+            else:
+                body, mode = assistant_rules_reply(action, message, ctx)
+
+        response_text = f"{assistant_disclaimer()}\n\n{body}"
+        now = utc_now_iso()
+        connection.execute(
+            """
+            INSERT INTO assistant_message (user_id, prompt, response, mode, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, message or action, response_text, mode, now, now),
+        )
+        connection.execute(
+            """
+            DELETE FROM assistant_message
+            WHERE user_id = ?
+              AND id NOT IN (
+                SELECT id FROM assistant_message WHERE user_id = ? ORDER BY id DESC LIMIT 20
+              )
+            """,
+            (user_id, user_id),
+        )
+        connection.commit()
+        connection.close()
+        return jsonify({"ok": True, "response": response_text, "mode": mode})
     def analytics():
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -2270,6 +2487,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/plan/current", "methods": ["GET"], "description": "Current 4-week plan calendar"},
             {"path": "/recovery", "methods": ["GET"], "description": "Recovery check-in page"},
             {"path": "/analytics", "methods": ["GET"], "description": "Founder analytics dashboard"},
+            {"path": "/assistant", "methods": ["GET"], "description": "In-app assistant coach"},
             {"path": "/login", "methods": ["GET", "POST"], "description": "User login"},
             {"path": "/signup", "methods": ["GET", "POST"], "description": "User signup"},
             {"path": "/logout", "methods": ["GET"], "description": "User logout"},
@@ -2280,6 +2498,7 @@ def create_app(port: int | None = None) -> Flask:
             {"path": "/restore", "methods": ["GET"], "description": "Backup restore page"},
             {"path": "/templates", "methods": ["GET"], "description": "Session template catalog"},
             {"path": "/api/recovery/checkin", "methods": ["POST"], "description": "Persist daily recovery check-in"},
+            {"path": "/api/assistant/chat", "methods": ["POST"], "description": "Assistant chat endpoint"},
             {"path": "/health", "methods": ["GET"], "description": "Operational health endpoint"},
             {"path": "/version", "methods": ["GET"], "description": "Build/version metadata"},
             {"path": "/diagnostics", "methods": ["GET"], "description": "Diagnostics checks (HTML)"},
@@ -2338,6 +2557,7 @@ def create_app(port: int | None = None) -> Flask:
             "/plan/current",
             "/recovery",
             "/analytics",
+            "/assistant",
             "/login",
             "/signup",
             "/logout",
@@ -2347,6 +2567,7 @@ def create_app(port: int | None = None) -> Flask:
             "/restore",
             "/templates",
             "/api/recovery/checkin",
+            "/api/assistant/chat",
             "/api/export/plan",
             "/api/export/json",
             "/api/export/history.csv",
