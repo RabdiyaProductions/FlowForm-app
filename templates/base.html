@@ -26,6 +26,20 @@
       <a href="/sessions">Sessions</a>
       <a href="/sessions/new">New Session</a>
       <a href="/ready">Ready</a>
+      <a href="/plan/wizard">Plan Wizard</a>
+      <a href="/plan/current">Current Plan</a>
+      <a href="/recovery">Recovery</a>
+      <a href="/analytics">Analytics</a>
+      <a href="/settings/profile">Profile</a>
+      <a href="/exports">Exports</a>
+      <a href="/restore">Restore</a>
+      {% if auth_enabled and current_session_user_id %}
+      <a href="/admin">Admin</a>
+      <a href="/logout">Logout</a>
+      {% elif auth_enabled %}
+      <a href="/login">Login</a>
+      <a href="/signup">Sign up</a>
+      {% endif %}
     </nav>
     {% block content %}{% endblock %}
   </div>
