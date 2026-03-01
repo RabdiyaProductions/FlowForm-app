@@ -1,12 +1,15 @@
 @echo off
 setlocal
 set "ROOT=%~dp0..\"
-set "URL=http://127.0.0.1:5203/diagnostics"
-if exist "%ROOT%meta.json" (
-  for /f "tokens=2 delims=:," %%A in ('findstr /i "\"port\"" "%ROOT%meta.json"') do set PORT_RAW=%%A
-  set PORT_RAW=%PORT_RAW: =%
-  set PORT_RAW=%PORT_RAW:"=%
-  if not "%PORT_RAW%"=="" set "URL=http://127.0.0.1:%PORT_RAW%/diagnostics"
+call "%ROOT%_open_browser.bat"
+set "EXIT_CODE=%ERRORLEVEL%"
+
+set "_NEED_PAUSE="
+echo %cmdcmdline% | findstr /I " /c " >nul && set "_NEED_PAUSE=1"
+if defined _NEED_PAUSE (
+  echo.
+  echo [FlowForm] Script finished with exit code %EXIT_CODE%.
+  pause
 )
-start "" "%URL%"
-endlocal
+
+endlocal & exit /b %EXIT_CODE%

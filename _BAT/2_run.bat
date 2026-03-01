@@ -1,19 +1,15 @@
 @echo off
 setlocal
 set "ROOT=%~dp0..\"
-set "PORT=5203"
+call "%ROOT%_run.bat"
+set "EXIT_CODE=%ERRORLEVEL%"
 
-if exist "%ROOT%meta.json" (
-  for /f "tokens=2 delims=:," %%A in ('findstr /i "\"port\"" "%ROOT%meta.json"') do set PORT_RAW=%%A
-  set PORT_RAW=%PORT_RAW: =%
-  set PORT_RAW=%PORT_RAW:"=%
-  if not "%PORT_RAW%"=="" set "PORT=%PORT_RAW%"
+set "_NEED_PAUSE="
+echo %cmdcmdline% | findstr /I " /c " >nul && set "_NEED_PAUSE=1"
+if defined _NEED_PAUSE (
+  echo.
+  echo [FlowForm] Script finished with exit code %EXIT_CODE%.
+  pause
 )
 
-set "PY=%ROOT%.venv\Scripts\python.exe"
-if not exist "%PY%" set "PY=python"
-
-echo [FlowForm] Deterministic run port: %PORT%
-echo [FlowForm] Ready URL: http://127.0.0.1:%PORT%/diagnostics
-start "FlowForm App" "%PY%" "%ROOT%run_server.py" --port %PORT%
-endlocal
+endlocal & exit /b %EXIT_CODE%

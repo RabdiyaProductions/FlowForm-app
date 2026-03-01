@@ -11,6 +11,13 @@ set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 
 echo [FlowForm] Setup started in "%ROOT%"
 
+if not exist "%ROOT%.env" (
+  if exist "%ROOT%.env.example" (
+    echo [FlowForm] .env missing, copying from .env.example...
+    copy /Y "%ROOT%.env.example" "%ROOT%.env" >nul
+  )
+)
+
 REM ------------------------------------------------------------
 REM Create virtual environment if missing.
 REM Uses py launcher when available, otherwise falls back to python.
