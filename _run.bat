@@ -2,11 +2,9 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "VENV_DIR=%ROOT%.venv"
-set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-
+set "VENV_PY=%ROOT%.venv\Scripts\python.exe"
 if not exist "%VENV_PY%" (
-  echo [FlowForm] ERROR: venv missing. Run 00_setup_all.bat first.
+  echo [FlowForm] ERROR: venv missing. Run 00_setup.bat first.
   exit /b 1
 )
 
