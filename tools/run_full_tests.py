@@ -14,6 +14,7 @@ def main() -> int:
     root = Path(__file__).resolve().parent.parent
 
     steps = [
+        [sys.executable, "tools/check_structure.py"],
         [sys.executable, "-m", "pytest", "tests_smoke.py"],
         [sys.executable, "-m", "pytest", "smoke_test.py"],
     ]
