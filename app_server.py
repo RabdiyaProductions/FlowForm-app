@@ -929,6 +929,7 @@ def create_app(port: int | None = None) -> Flask:
         GIT_HASH=git_hash(),
         FIRST_CHECK={"ok": True, "message": ""},
         ENABLE_AUTH=env_flag_true(os.getenv("ENABLE_AUTH")),
+        ENABLE_AUTH=str(os.getenv("ENABLE_AUTH", "false")).lower() == "true",
     )
     app.secret_key = os.getenv("SECRET_KEY", "flowform-dev-secret")
 
@@ -971,6 +972,53 @@ def create_app(port: int | None = None) -> Flask:
             "auth_enabled": auth_enabled(),
             "current_session_user_id": session.get("user_id"),
         }
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+            connection = sqlite3.connect(db_path)
+            uid = current_user_id(connection)
+            connection.close()
+            if uid <= 0:
+                if is_api_request():
+                    return jsonify({"error": "auth_required"}), 401
+                return redirect(url_for("login_page"))
+            return view(*args, **kwargs)
+
+        return wrapped
+
+    @app.context_processor
+    def inject_auth_flags():
+        return {
+            "auth_enabled": auth_enabled(),
+            "current_session_user_id": session.get("user_id"),
+        }
+
+    def init_db_safely() -> dict:
+        try:
+            connection = sqlite3.connect(db_path)
+            apply_schema_migrations(connection)
+            get_or_create_founder_user(connection)
+            seed_templates(connection)
+            connection.commit()
+            connection.close()
+            return {"ok": True, "message": "db_ready"}
+        except sqlite3.Error as exc:
+            app.logger.warning("SQLite init degraded: %s", exc)
+            return {"ok": False, "message": f"SQLite init degraded: {exc}"}
 
     def init_db_safely() -> dict:
         try:
@@ -1077,6 +1125,71 @@ def create_app(port: int | None = None) -> Flask:
     def logout():
         session.clear()
         return redirect(url_for("login_page") if auth_enabled() else url_for("ready"))
+        return render_template("ready.html")
+
+    @app.get("/signup")
+    def signup_page():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        return render_template("signup.html")
+
+    @app.post("/signup")
+    def signup_submit():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        display_name = str(request.form.get("display_name", "")).strip() or "User"
+        if not email or not password:
+            return render_template("signup.html", error="Email and password are required."), 400
+
+        connection = sqlite3.connect(db_path)
+        exists = connection.execute("SELECT id FROM users WHERE lower(email) = ?", (email,)).fetchone()
+        if exists:
+            connection.close()
+            return render_template("signup.html", error="Email already registered."), 400
+        now = utc_now_iso()
+        cursor = connection.execute(
+            """
+            INSERT INTO users (email, display_name, password_hash, role, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, 'member', 1, ?, ?)
+            """,
+            (email, display_name, generate_password_hash(password), now, now),
+        )
+        user_id = int(cursor.lastrowid)
+        ensure_subscription_row(connection, user_id)
+        connection.commit()
+        connection.close()
+        session["user_id"] = user_id
+        return redirect(url_for("ready"))
+
+    @app.get("/login")
+    def login_page():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        return render_template("login.html")
+
+    @app.post("/login")
+    def login_submit():
+        if not auth_enabled():
+            return redirect(url_for("ready"))
+        email = str(request.form.get("email", "")).strip().lower()
+        password = str(request.form.get("password", "")).strip()
+        connection = sqlite3.connect(db_path)
+        row = connection.execute(
+            "SELECT id, password_hash, enabled FROM users WHERE lower(email) = ?",
+            (email,),
+        ).fetchone()
+        connection.close()
+        if (not row) or int(row[2]) == 0 or not check_password_hash(str(row[1] or ""), password):
+            return render_template("login.html", error="Invalid credentials."), 401
+        session["user_id"] = int(row[0])
+        return redirect(url_for("ready"))
+
+    @app.get("/logout")
+    def logout():
+        session.clear()
+        return redirect(url_for("login_page") if auth_enabled() else url_for("ready"))
 
     @app.get("/health")
     def health():
@@ -1163,6 +1276,7 @@ def create_app(port: int | None = None) -> Flask:
                         "benefits": ["unlimited_plans", "priority_support", "early_access_ai"],
                         "pay_now_link": None,
                     }), 403
+            user_id = get_or_create_founder_user(connection)
 
             profile_row = connection.execute(
                 "SELECT id FROM profile WHERE user_id = ? ORDER BY id DESC LIMIT 1",
@@ -1202,6 +1316,7 @@ def create_app(port: int | None = None) -> Flask:
             plan_id = int(cursor.lastrowid)
 
             pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session, None if is_paid else 3)
+            pool = fetch_template_pool(connection, ordered_disciplines, minutes_per_session)
             if not pool:
                 raise sqlite3.IntegrityError("session_template empty; cannot generate plan")
             items = build_plan_structure(pool, ordered_disciplines, days_per_week, minutes_per_session, weeks=4)
@@ -1248,6 +1363,7 @@ def create_app(port: int | None = None) -> Flask:
         now = utc_now_iso()
         try:
             user_id = current_user_id(connection)
+            user_id = get_or_create_founder_user(connection)
             row = current_plan_record(connection, user_id)
             if row is None:
                 raise sqlite3.IntegrityError("No plan found")
@@ -1334,6 +1450,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def recovery():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         rows = connection.execute(
             """
             SELECT date, sleep_hours, stress_1_10, soreness_1_10, mood_1_10, notes
@@ -1381,6 +1501,7 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         try:
             user_id = current_user_id(connection)
+            user_id = get_or_create_founder_user(connection)
             existing = connection.execute(
                 "SELECT id FROM recovery_checkin WHERE user_id = ? AND date = ?",
                 (user_id, checkin_date),
@@ -1420,6 +1541,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def plan_current():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         plan = current_plan_record(connection, user_id)
         if plan is None:
             connection.close()
@@ -1435,6 +1560,10 @@ def create_app(port: int | None = None) -> Flask:
             LEFT JOIN session_completion sc ON sc.plan_day_id = pd.id
             WHERE pd.plan_id = ?
             GROUP BY pd.id, pd.week, pd.day_index, pd.title, st.name, st.discipline, st.duration_minutes
+            SELECT pd.id, pd.week, pd.day_index, pd.title, st.name AS template_name, st.discipline, st.duration_minutes
+            FROM plan_day pd
+            LEFT JOIN session_template st ON st.id = pd.template_id
+            WHERE pd.plan_id = ?
             ORDER BY pd.week ASC, pd.day_index ASC
             """,
             (int(plan["id"]),),
@@ -1527,6 +1656,14 @@ def create_app(port: int | None = None) -> Flask:
             FROM session_template
             ORDER BY discipline ASC, duration_minutes ASC, id ASC
             {limit_clause}
+    def templates_catalog():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """
+            SELECT id, name, discipline, duration_minutes, level
+            FROM session_template
+            ORDER BY discipline ASC, duration_minutes ASC, id ASC
             """
         ).fetchall()
         connection.close()
@@ -1538,6 +1675,10 @@ def create_app(port: int | None = None) -> Flask:
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
         user_id = current_user_id(connection)
+    def analytics():
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = get_or_create_founder_user(connection)
         data = analytics_snapshot(connection, user_id)
         connection.close()
         return render_template("analytics.html", analytics=data)
@@ -1644,6 +1785,7 @@ def create_app(port: int | None = None) -> Flask:
 
     @app.get("/session/start/<int:plan_day_id>")
     @require_login
+    @app.get("/session/start/<int:plan_day_id>")
     def session_start(plan_day_id: int):
         connection = sqlite3.connect(db_path)
         connection.row_factory = sqlite3.Row
@@ -1739,6 +1881,8 @@ def create_app(port: int | None = None) -> Flask:
 
         return render_template("session_summary.html", completion=row)
 
+        )
+
     @app.post("/api/timeline/update")
     def api_timeline_update():
         return jsonify({"ok": True, "route": "/api/timeline/update"})
@@ -1774,6 +1918,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_plan():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_plan():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         connection.close()
 
@@ -1852,6 +1999,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_json():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_json():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         connection.close()
 
@@ -1865,6 +2015,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_zip():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_zip():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         connection.close()
 
@@ -1891,6 +2044,9 @@ def create_app(port: int | None = None) -> Flask:
     def api_export_backup():
         connection = sqlite3.connect(db_path)
         user_id = current_user_id(connection)
+    def api_export_backup():
+        connection = sqlite3.connect(db_path)
+        user_id = get_or_create_founder_user(connection)
         payload = export_snapshot(connection, user_id)
         manifest = backup_manifest(connection)
         connection.close()
@@ -2003,6 +2159,8 @@ def create_app(port: int | None = None) -> Flask:
         ok, error_code = validate_backup_zip_names(names)
         if not ok:
             return jsonify({"ok": False, "error": error_code, "message": "Backup ZIP contains invalid or unsafe paths."}), 400
+        if "flowform.db" not in names:
+            return jsonify({"ok": False, "error": "flowform.db_missing"}), 400
 
         manifest = {}
         if "manifest.json" in names:
@@ -2048,6 +2206,7 @@ def create_app(port: int | None = None) -> Flask:
             if not required.issubset(existing):
                 raise ValueError("backup_database_schema_invalid")
 
+            old_db = db_target.with_suffix(".pre_restore.bak")
             if db_target.exists():
                 shutil.copy2(db_target, old_db)
 
@@ -2055,6 +2214,7 @@ def create_app(port: int | None = None) -> Flask:
             shutil.copy2(stage_db, tmp_live_db)
             tmp_live_db.replace(db_target)
 
+            old_media = MEDIA_DIR.parent / "media_pre_restore"
             if old_media.exists():
                 shutil.rmtree(old_media)
             if MEDIA_DIR.exists():
@@ -2080,6 +2240,8 @@ def create_app(port: int | None = None) -> Flask:
                     pass
             shutil.rmtree(temp_dir, ignore_errors=True)
             return jsonify({"ok": False, "error": "restore_failed", "message": str(exc)}), 400
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"ok": False, "error": str(exc)}), 400
 
         shutil.rmtree(temp_dir, ignore_errors=True)
         return jsonify({"ok": True, "restored": summary})
@@ -2192,6 +2354,10 @@ def create_app(port: int | None = None) -> Flask:
             "/api/export/plan_pdf/<plan_id>",
             "/api/export/session_summary/<completion_id>",
             "/api/import/backup",
+            "/api/recovery/checkin",
+            "/api/export/plan",
+            "/api/export/json",
+            "/api/recovery/checkin",
             "/api/spec",
             "/diagnostics",
             "/ready",
@@ -2240,6 +2406,7 @@ def create_app(port: int | None = None) -> Flask:
         }
         connection.close()
         return render_template("ready.html", counts=counts)
+        return render_template("ready.html")
 
     return app
 

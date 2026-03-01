@@ -5,6 +5,7 @@
   {% if auth_disabled_note %}<p class="muted">Auth disabled. Founder Mode is active.</p>{% endif %}
   {% if error %}<p style="color:#ff8e8e;">{{ error }}</p>{% endif %}
   {% if not auth_disabled_note %}
+  {% if error %}<p style="color:#ff8e8e;">{{ error }}</p>{% endif %}
   <form method="post" action="/signup">
     <label>Name</label>
     <input type="text" name="display_name" required />
