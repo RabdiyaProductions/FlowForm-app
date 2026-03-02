@@ -293,3 +293,24 @@ All tables are created via safe migration rules (`CREATE TABLE IF NOT EXISTS` + 
 ## Boot/test compatibility
 - Existing boot scripts are unchanged.
 - Structure guard remains integrated in `_BAT/6_run_tests.bat` and `tools/run_full_tests.py`.
+
+### 8) Portable Content Pack export
+#### Discovery: `GET /content-packs`
+Behavior:
+- returns JSON list of available session templates (`id`, `name`, `discipline`, `duration`) for content-pack selection.
+
+#### Export: `POST /content-packs/export`
+Behavior:
+- accepts selected `template_ids`,
+- exports a ZIP containing:
+  - `content_pack.json` with:
+    - selected templates (`id`, `name`, `discipline`, `duration`, `json_blocks`),
+    - referenced media metadata (`id`, `filename`, `type`, `tags`),
+    - export version metadata (`app_version`, `exported_at`),
+  - `media/*` payload files for referenced media only,
+- ZIP is staged to a temp file and streamed as download.
+
+Exact steps:
+1. Call `GET /content-packs` and choose template IDs.
+2. Call `POST /content-packs/export` with selected IDs.
+3. Open ZIP and verify `content_pack.json` + referenced `media/*` files.
