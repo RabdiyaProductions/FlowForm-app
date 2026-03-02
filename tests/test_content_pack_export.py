@@ -28,6 +28,10 @@ def test_export_returns_zip_and_content_pack_json(tmp_path):
             ("clip.mp4", "video", "tag1,tag2"),
         )
         media_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            "INSERT INTO media_item (filename, media_type, tags) VALUES (?, ?, ?)",
+            ("unused.mp4", "video", "unused"),
+        )
 
         blocks = json.dumps({"blocks": [{"name": "warmup", "minutes": 10, "media_item_id": media_id}]})
         conn.execute(
@@ -38,6 +42,7 @@ def test_export_returns_zip_and_content_pack_json(tmp_path):
         conn.commit()
 
     (media_dir / "clip.mp4").write_bytes(b"fake-media")
+    (media_dir / "unused.mp4").write_bytes(b"unused-media")
 
     response = client.post("/content-packs/export", json={"template_ids": [template_id]})
 
@@ -47,6 +52,7 @@ def test_export_returns_zip_and_content_pack_json(tmp_path):
     with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
         assert "content_pack.json" in archive.namelist()
         assert "media/clip.mp4" in archive.namelist()
+        assert "media/unused.mp4" not in archive.namelist()
 
         payload = json.loads(archive.read("content_pack.json"))
         assert payload["templates"][0]["id"] == template_id

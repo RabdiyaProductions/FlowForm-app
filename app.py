@@ -1,16 +1,27 @@
 import json
 import os
+import json
 import sqlite3
 import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from flask import Flask, jsonify, request, send_file
 from flask import Flask, jsonify, send_file, request
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def blocks_from_json(raw: str) -> list[dict]:
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return []
+    blocks = payload.get("blocks") if isinstance(payload, dict) else None
+    return blocks if isinstance(blocks, list) else []
 
 
 def init_db(db_path: Path) -> None:
@@ -68,6 +79,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.config.update(
         DB_PATH=os.getenv("DATABASE_PATH", "instance/flowform.db"),
         MEDIA_DIR=os.getenv("MEDIA_DIR", "instance/media"),
+        VERSION=os.getenv("APP_VERSION", "0.1.0"),
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
         VERSION=os.getenv("APP_VERSION", "0.1.0"),
     )
@@ -115,6 +127,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         )
 
     @app.get("/content-packs")
+    def content_packs_index():
     def list_content_packs():
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -125,6 +138,12 @@ def create_app(test_config: dict | None = None) -> Flask:
             {
                 "templates": [
                     {
+                        "id": int(r["id"]),
+                        "name": r["name"],
+                        "discipline": r["discipline"],
+                        "duration": int(r["duration_minutes"]),
+                    }
+                    for r in rows
                         "id": int(row["id"]),
                         "name": row["name"],
                         "discipline": row["discipline"],
@@ -136,6 +155,14 @@ def create_app(test_config: dict | None = None) -> Flask:
         )
 
     @app.post("/content-packs/export")
+    def content_packs_export():
+        payload = request.get_json(silent=True) or {}
+        raw_ids = payload.get("template_ids") or []
+        if not isinstance(raw_ids, list):
+            raw_ids = [raw_ids]
+
+        template_ids = []
+        for item in raw_ids:
     def export_content_pack():
         payload = request.get_json(silent=True) or {}
         ids = payload.get("template_ids") or []
@@ -155,12 +182,18 @@ def create_app(test_config: dict | None = None) -> Flask:
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             placeholders = ",".join("?" for _ in template_ids)
+            template_rows = conn.execute(
             templates = conn.execute(
                 f"SELECT id, name, discipline, duration_minutes, json_blocks FROM session_template WHERE id IN ({placeholders}) ORDER BY id ASC",
                 tuple(template_ids),
             ).fetchall()
 
             media_ids = set()
+            templates_payload = []
+            for row in template_rows:
+                for block in blocks_from_json(row["json_blocks"]):
+                    try:
+                        media_id = int(block.get("media_item_id")) if block.get("media_item_id") is not None else None
             template_payload = []
             for row in templates:
                 blocks = parse_blocks(row["json_blocks"])
@@ -171,6 +204,7 @@ def create_app(test_config: dict | None = None) -> Flask:
                         media_id = None
                     if media_id:
                         media_ids.add(media_id)
+                templates_payload.append(
                 template_payload.append(
                     {
                         "id": int(row["id"]),
@@ -191,18 +225,30 @@ def create_app(test_config: dict | None = None) -> Flask:
 
         content_pack = {
             "version": {"app_version": app.config["VERSION"], "exported_at": utc_now_iso()},
+            "templates": templates_payload,
             "templates": template_payload,
             "media": [
                 {
                     "id": int(row["id"]),
                     "filename": row["filename"],
                     "type": row["media_type"],
+                    "tags": [tag.strip() for tag in str(row["tags"] or "").split(",") if tag.strip()],
                     "tags": row["tags"],
                 }
                 for row in media_rows
             ],
         }
 
+        temp = tempfile.NamedTemporaryFile(prefix="flowform_content_pack_", suffix=".zip", delete=False)
+        temp_path = Path(temp.name)
+        temp.close()
+
+        with zipfile.ZipFile(temp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("content_pack.json", json.dumps(content_pack, indent=2))
+            for row in media_rows:
+                path = media_dir / row["filename"]
+                if path.exists() and path.is_file():
+                    zf.write(path, arcname=f"media/{row['filename']}")
         temp_file = tempfile.NamedTemporaryFile(prefix="content_pack_", suffix=".zip", delete=False)
         temp_path = Path(temp_file.name)
         temp_file.close()
@@ -217,6 +263,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         response = send_file(temp_path, mimetype="application/zip", as_attachment=True, download_name="content_pack.zip")
 
         @response.call_on_close
+        def _cleanup_temp_export() -> None:
         def _cleanup() -> None:
             temp_path.unlink(missing_ok=True)
 
