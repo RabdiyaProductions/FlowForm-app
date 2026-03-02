@@ -212,3 +212,14 @@ Recovery drill:
 - ZIP includes `content_pack.json`,
 - `content_pack.json` includes selected templates and export metadata (`app_version`, `exported_at`),
 - ZIP includes `media/*` files only for media referenced by selected templates.
+
+## Journey 17 — Block media attachments render during playback
+**Steps**
+1. Open template builder for an existing template.
+2. Attach media to at least one block and save.
+3. Open session player page for that template.
+
+**Accept if**
+- block-level `media_id` is persisted in template blocks,
+- player page shows attached media details,
+- player provides preview/play/download controls for attached media.

@@ -7,6 +7,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from flask import Flask, jsonify, request, send_file, render_template_string, redirect, url_for
+from werkzeug.utils import secure_filename
 from flask import Flask, jsonify, request, send_file
 from flask import Flask, jsonify, send_file, request
 
@@ -268,6 +270,124 @@ def create_app(test_config: dict | None = None) -> Flask:
             temp_path.unlink(missing_ok=True)
 
         return response
+
+    @app.get("/templates/builder/<int:template_id>")
+    def template_builder(template_id: int):
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            template = conn.execute(
+                "SELECT id, name, json_blocks FROM session_template WHERE id = ?",
+                (template_id,),
+            ).fetchone()
+            if template is None:
+                return jsonify({"error": "template_not_found"}), 404
+            media_items = conn.execute(
+                "SELECT id, filename, media_type, tags FROM media_item ORDER BY id DESC"
+            ).fetchall()
+
+        blocks = blocks_from_json(template["json_blocks"])
+        return render_template_string(
+            """
+            <h1>Template Builder: {{ template['name'] }}</h1>
+            <form method="post" action="{{ url_for('template_builder_save', template_id=template['id']) }}">
+            {% for block in blocks %}
+              <div>
+                <strong>{{ block.get('name', 'Block') }}</strong>
+                <select name="media_id_{{ loop.index0 }}">
+                  <option value="">No media</option>
+                  {% for item in media_items %}
+                    <option value="{{ item['id'] }}" {% if block.get('media_id') == item['id'] %}selected{% endif %}>
+                      {{ item['filename'] }} ({{ item['media_type'] }})
+                    </option>
+                  {% endfor %}
+                </select>
+              </div>
+            {% endfor %}
+              <button type="submit">Save</button>
+            </form>
+            """,
+            template=template,
+            blocks=blocks,
+            media_items=media_items,
+        )
+
+    @app.post("/templates/builder/<int:template_id>/save")
+    def template_builder_save(template_id: int):
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            template = conn.execute(
+                "SELECT id, json_blocks FROM session_template WHERE id = ?",
+                (template_id,),
+            ).fetchone()
+            if template is None:
+                return jsonify({"error": "template_not_found"}), 404
+
+            blocks = blocks_from_json(template["json_blocks"])
+            for idx, block in enumerate(blocks):
+                raw_media = request.form.get(f"media_id_{idx}")
+                try:
+                    block["media_id"] = int(raw_media) if raw_media else None
+                except ValueError:
+                    block["media_id"] = None
+
+            conn.execute(
+                "UPDATE session_template SET json_blocks = ? WHERE id = ?",
+                (json.dumps({"blocks": blocks}), template_id),
+            )
+            conn.commit()
+
+        return redirect(url_for("template_builder", template_id=template_id))
+
+    @app.get("/media/file/<path:filename>")
+    def media_file(filename: str):
+        safe_name = secure_filename(filename)
+        if not safe_name:
+            return jsonify({"error": "invalid_filename"}), 400
+        path = media_dir / safe_name
+        if not path.exists() or not path.is_file():
+            return jsonify({"error": "media_not_found"}), 404
+        return send_file(path)
+
+    @app.get("/session/player/<int:template_id>")
+    def session_player(template_id: int):
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            template = conn.execute(
+                "SELECT id, name, json_blocks FROM session_template WHERE id = ?",
+                (template_id,),
+            ).fetchone()
+            if template is None:
+                return jsonify({"error": "template_not_found"}), 404
+            media_rows = conn.execute("SELECT id, filename, media_type FROM media_item").fetchall()
+        media_map = {int(r["id"]): dict(r) for r in media_rows}
+        blocks = blocks_from_json(template["json_blocks"])
+        for block in blocks:
+            media_id = block.get("media_id")
+            block["media"] = media_map.get(int(media_id)) if media_id else None
+
+        return render_template_string(
+            """
+            <h1>Session Player: {{ template['name'] }}</h1>
+            {% for block in blocks %}
+              <section>
+                <h2>{{ block.get('name', 'Block') }}</h2>
+                {% if block.get('media') %}
+                  <div>Attached media: {{ block['media']['filename'] }}</div>
+                  <a href="{{ url_for('media_file', filename=block['media']['filename']) }}">Download</a>
+                  {% if block['media']['media_type'] == 'video' %}
+                    <video controls width="320" src="{{ url_for('media_file', filename=block['media']['filename']) }}"></video>
+                  {% elif block['media']['media_type'] == 'audio' %}
+                    <audio controls src="{{ url_for('media_file', filename=block['media']['filename']) }}"></audio>
+                  {% else %}
+                    <img alt="preview" width="240" src="{{ url_for('media_file', filename=block['media']['filename']) }}" />
+                  {% endif %}
+                {% endif %}
+              </section>
+            {% endfor %}
+            """,
+            template=template,
+            blocks=blocks,
+        )
 
     return app
 
