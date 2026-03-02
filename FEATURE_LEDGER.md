@@ -293,3 +293,40 @@ All tables are created via safe migration rules (`CREATE TABLE IF NOT EXISTS` + 
 ## Boot/test compatibility
 - Existing boot scripts are unchanged.
 - Structure guard remains integrated in `_BAT/6_run_tests.bat` and `tools/run_full_tests.py`.
+
+### 8) Portable Content Pack export
+#### Discovery: `GET /content-packs`
+Behavior:
+- returns JSON list of available session templates (`id`, `name`, `discipline`, `duration`) for content-pack selection.
+
+#### Export: `POST /content-packs/export`
+Behavior:
+- accepts selected `template_ids`,
+- exports a ZIP containing:
+  - `content_pack.json` with:
+    - selected templates (`id`, `name`, `discipline`, `duration`, `json_blocks`),
+    - referenced media metadata (`id`, `filename`, `type`, `tags`),
+    - export version metadata (`app_version`, `exported_at`),
+  - `media/*` payload files for referenced media only,
+- ZIP is staged to a temp file and streamed as download.
+
+Exact steps:
+1. Call `GET /content-packs` and choose template IDs.
+2. Call `POST /content-packs/export` with selected IDs.
+3. Open ZIP and verify `content_pack.json` + referenced `media/*` files.
+
+### 9) Template block media attachments in builder/player
+#### Template Builder: `GET /templates/builder/<template_id>` + `POST /templates/builder/<template_id>/save`
+Behavior:
+- each template block can choose optional media from media library,
+- selected media is persisted into `session_template.json_blocks` under `media_id` per block.
+
+#### Session player: `GET /session/player/<template_id>`
+Behavior:
+- when a block has `media_id`, player shows attached media details and controls,
+- includes preview/play UI by media type and a download link to `/media/file/<filename>`.
+
+Exact steps:
+1. Open template builder for a template.
+2. Select media for one or more blocks and save.
+3. Open session player for that template and confirm embedded media controls render.
