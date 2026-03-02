@@ -200,3 +200,38 @@ Recovery drill:
 - upload persists in media library with metadata/tags,
 - template block saves linked media selection,
 - session player shows linked media for the active block.
+
+## Journey 16 — Portable Content Pack ZIP export works
+**Steps**
+1. Call `GET /content-packs` and select one or more template IDs.
+2. Call `POST /content-packs/export` with selected `template_ids`.
+3. Open the returned ZIP.
+
+**Accept if**
+- response is a downloadable ZIP,
+- ZIP includes `content_pack.json`,
+- `content_pack.json` includes selected templates and export metadata (`app_version`, `exported_at`),
+- ZIP includes `media/*` files only for media referenced by selected templates.
+
+## Journey 17 — Block media attachments render during playback
+**Steps**
+1. Open template builder for an existing template.
+2. Attach media to at least one block and save.
+3. Open session player page for that template.
+
+**Accept if**
+- block-level `media_id` is persisted in template blocks,
+- player page shows attached media details,
+- player provides preview/play/download controls for attached media.
+
+## Journey 18 — Backup/restore preserves media and reports missing references safely
+**Steps**
+1. Trigger `GET /api/export/backup` and download ZIP.
+2. Wipe current DB/media state.
+3. Restore via `POST /api/import/backup`.
+4. Open session/player or media URLs for templates restored from backup.
+
+**Accept if**
+- backup ZIP contains `flowform.db`, `flowform_backup.json`, and `media/*` files,
+- restore recreates DB + media files so previously referenced media is still available,
+- if template blocks reference missing media, restore returns warnings/report and does not crash.
