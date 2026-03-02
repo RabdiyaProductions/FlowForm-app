@@ -1,8 +1,16 @@
+import json
 import os
 import sqlite3
+import tempfile
+import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, send_file, request
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def init_db(db_path: Path) -> None:
@@ -22,6 +30,36 @@ def init_db(db_path: Path) -> None:
             VALUES ('initialized', 'true')
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_template (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                discipline TEXT NOT NULL,
+                duration_minutes INTEGER NOT NULL,
+                json_blocks TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS media_item (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                media_type TEXT NOT NULL,
+                tags TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+
+
+def parse_blocks(raw: str) -> list[dict]:
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return []
+    blocks = payload.get("blocks") if isinstance(payload, dict) else None
+    return blocks if isinstance(blocks, list) else []
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -29,13 +67,17 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     app.config.update(
         DB_PATH=os.getenv("DATABASE_PATH", "instance/flowform.db"),
+        MEDIA_DIR=os.getenv("MEDIA_DIR", "instance/media"),
         OPENAI_API_KEY=os.getenv("OPENAI_API_KEY", ""),
+        VERSION=os.getenv("APP_VERSION", "0.1.0"),
     )
 
     if test_config:
         app.config.update(test_config)
 
     db_path = Path(app.config["DB_PATH"])
+    media_dir = Path(app.config["MEDIA_DIR"])
+    media_dir.mkdir(parents=True, exist_ok=True)
     init_db(db_path)
 
     @app.get("/api/health")
@@ -71,6 +113,114 @@ def create_app(test_config: dict | None = None) -> Flask:
                 },
             }
         )
+
+    @app.get("/content-packs")
+    def list_content_packs():
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, name, discipline, duration_minutes FROM session_template ORDER BY id ASC"
+            ).fetchall()
+        return jsonify(
+            {
+                "templates": [
+                    {
+                        "id": int(row["id"]),
+                        "name": row["name"],
+                        "discipline": row["discipline"],
+                        "duration": int(row["duration_minutes"]),
+                    }
+                    for row in rows
+                ]
+            }
+        )
+
+    @app.post("/content-packs/export")
+    def export_content_pack():
+        payload = request.get_json(silent=True) or {}
+        ids = payload.get("template_ids") or []
+        if not isinstance(ids, list):
+            ids = [ids]
+
+        template_ids = []
+        for item in ids:
+            try:
+                template_ids.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        template_ids = sorted(set(template_ids))
+        if not template_ids:
+            return jsonify({"error": "template_ids_required"}), 400
+
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            placeholders = ",".join("?" for _ in template_ids)
+            templates = conn.execute(
+                f"SELECT id, name, discipline, duration_minutes, json_blocks FROM session_template WHERE id IN ({placeholders}) ORDER BY id ASC",
+                tuple(template_ids),
+            ).fetchall()
+
+            media_ids = set()
+            template_payload = []
+            for row in templates:
+                blocks = parse_blocks(row["json_blocks"])
+                for block in blocks:
+                    try:
+                        media_id = int(block.get("media_item_id"))
+                    except (TypeError, ValueError):
+                        media_id = None
+                    if media_id:
+                        media_ids.add(media_id)
+                template_payload.append(
+                    {
+                        "id": int(row["id"]),
+                        "name": row["name"],
+                        "discipline": row["discipline"],
+                        "duration": int(row["duration_minutes"]),
+                        "json_blocks": row["json_blocks"],
+                    }
+                )
+
+            media_rows = []
+            if media_ids:
+                media_placeholders = ",".join("?" for _ in media_ids)
+                media_rows = conn.execute(
+                    f"SELECT id, filename, media_type, tags FROM media_item WHERE id IN ({media_placeholders}) ORDER BY id ASC",
+                    tuple(sorted(media_ids)),
+                ).fetchall()
+
+        content_pack = {
+            "version": {"app_version": app.config["VERSION"], "exported_at": utc_now_iso()},
+            "templates": template_payload,
+            "media": [
+                {
+                    "id": int(row["id"]),
+                    "filename": row["filename"],
+                    "type": row["media_type"],
+                    "tags": row["tags"],
+                }
+                for row in media_rows
+            ],
+        }
+
+        temp_file = tempfile.NamedTemporaryFile(prefix="content_pack_", suffix=".zip", delete=False)
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+
+        with zipfile.ZipFile(temp_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("content_pack.json", json.dumps(content_pack, indent=2))
+            for row in media_rows:
+                media_path = media_dir / row["filename"]
+                if media_path.exists() and media_path.is_file():
+                    archive.write(media_path, arcname=f"media/{row['filename']}")
+
+        response = send_file(temp_path, mimetype="application/zip", as_attachment=True, download_name="content_pack.zip")
+
+        @response.call_on_close
+        def _cleanup() -> None:
+            temp_path.unlink(missing_ok=True)
+
+        return response
 
     return app
 

@@ -200,3 +200,15 @@ Recovery drill:
 - upload persists in media library with metadata/tags,
 - template block saves linked media selection,
 - session player shows linked media for the active block.
+
+## Journey 16 — Portable Content Pack ZIP export works
+**Steps**
+1. Call `GET /content-packs` and select one or more template IDs.
+2. Call `POST /content-packs/export` with selected `template_ids`.
+3. Open the returned ZIP.
+
+**Accept if**
+- response is a downloadable ZIP,
+- ZIP includes `content_pack.json`,
+- `content_pack.json` includes selected templates and export metadata (`app_version`, `exported_at`),
+- ZIP includes `media/*` files only for media referenced by selected templates.
