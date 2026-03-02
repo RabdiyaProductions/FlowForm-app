@@ -207,3 +207,57 @@ def test_navigation_and_empty_state_ctas_are_visible(tmp_path):
     packs_html = client.get("/content-packs/ui").get_data(as_text=True)
     assert "Import Pack ZIP" in packs_html
     assert 'name="viewport"' in packs_html
+
+
+def test_template_edit_persists_fields_and_block_media_id(tmp_path):
+    db_path = tmp_path / "edit.db"
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+    app = create_app({"TESTING": True, "DB_PATH": str(db_path), "MEDIA_DIR": str(media_dir)})
+    client = app.test_client()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO media_item (filename, media_type, tags) VALUES (?, ?, ?)",
+            ("attach.mp4", "video", "tag"),
+        )
+        media_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            "INSERT INTO session_template (name, discipline, duration_minutes, level, json_blocks) VALUES (?, ?, ?, ?, ?)",
+            (
+                "Original",
+                "strength",
+                20,
+                "beginner",
+                json.dumps({"blocks": [{"name": "Block A", "minutes": 20}]}),
+            ),
+        )
+        template_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.commit()
+
+    response = client.post(
+        f"/templates/{template_id}/edit",
+        data={
+            "name": "Updated Template",
+            "discipline": "cardio",
+            "duration_minutes": "35",
+            "level": "intermediate",
+            "media_id_0": str(media_id),
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT name, discipline, duration_minutes, level, json_blocks FROM session_template WHERE id = ?",
+            (template_id,),
+        ).fetchone()
+
+    assert row["name"] == "Updated Template"
+    assert row["discipline"] == "cardio"
+    assert int(row["duration_minutes"]) == 35
+    assert row["level"] == "intermediate"
+    blocks = json.loads(row["json_blocks"])["blocks"]
+    assert int(blocks[0]["media_id"]) == media_id

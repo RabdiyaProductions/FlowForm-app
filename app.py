@@ -63,10 +63,14 @@ def init_db(db_path: Path) -> None:
                 name TEXT NOT NULL,
                 discipline TEXT NOT NULL,
                 duration_minutes INTEGER NOT NULL,
+                level TEXT NOT NULL DEFAULT 'all_levels',
                 json_blocks TEXT NOT NULL
             )
             """
         )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(session_template)").fetchall()}
+        if "level" not in cols:
+            conn.execute("ALTER TABLE session_template ADD COLUMN level TEXT NOT NULL DEFAULT 'all_levels'")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS media_item (
@@ -478,6 +482,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     def templates_page():
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT id, name, discipline, duration_minutes, level FROM session_template ORDER BY id DESC").fetchall()
             rows = conn.execute("SELECT id, name, discipline, duration_minutes FROM session_template ORDER BY id DESC").fetchall()
         if not rows:
             return render_page(
@@ -497,6 +502,8 @@ def create_app(test_config: dict | None = None) -> Flask:
                 """,
             )
         items = "".join(
+            f"<li><a href='/templates/builder/{int(r['id'])}'>{r['name']}</a> · {r['discipline']} · {int(r['duration_minutes'])} min · {r['level']} "
+            f"<a class='cta' href='/templates/{int(r['id'])}/edit'>Edit</a></li>"
             f"<li><a href='/templates/builder/{int(r['id'])}'>{r['name']}</a> · {r['discipline']} · {int(r['duration_minutes'])} min</li>"
             for r in rows
         )
@@ -507,12 +514,97 @@ def create_app(test_config: dict | None = None) -> Flask:
         name = (request.form.get("name") or "New Template").strip()
         with sqlite3.connect(db_path) as conn:
             conn.execute(
+                "INSERT INTO session_template (name, discipline, duration_minutes, level, json_blocks) VALUES (?, ?, ?, ?, ?)",
+                (name, "general", 30, "all_levels", json.dumps({"blocks": [{"name": "Block 1", "minutes": 30}]})),
                 "INSERT INTO session_template (name, discipline, duration_minutes, json_blocks) VALUES (?, ?, ?, ?)",
                 (name, "general", 30, json.dumps({"blocks": [{"name": "Block 1", "minutes": 30}]})),
             )
             template_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
             conn.commit()
         return redirect(url_for("template_builder", template_id=template_id))
+
+    @app.get("/templates/<int:template_id>/edit")
+    def template_edit(template_id: int):
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            template = conn.execute(
+                "SELECT id, name, discipline, duration_minutes, level, json_blocks FROM session_template WHERE id = ?",
+                (template_id,),
+            ).fetchone()
+            if template is None:
+                return jsonify({"error": "template_not_found"}), 404
+            media_items = conn.execute("SELECT id, filename, media_type FROM media_item ORDER BY id DESC").fetchall()
+
+        blocks = blocks_from_json(template["json_blocks"])
+        block_rows = []
+        for idx, block in enumerate(blocks):
+            options = ["<option value=''>No media</option>"]
+            for item in media_items:
+                selected = "selected" if block.get("media_id") == item["id"] else ""
+                options.append(f"<option value='{int(item['id'])}' {selected}>{item['filename']} ({item['media_type']})</option>")
+            block_rows.append(
+                f"<div class='card'><strong>{block.get('name', f'Block {idx + 1}')}</strong><br/>"
+                f"<select name='media_id_{idx}'>{''.join(options)}</select></div>"
+            )
+
+        levels = ["beginner", "intermediate", "advanced", "all_levels"]
+        level_options = "".join(
+            f"<option value='{lvl}' {'selected' if (template['level'] or 'all_levels') == lvl else ''}>{lvl}</option>"
+            for lvl in levels
+        )
+        disciplines = ["strength", "cardio", "mobility", "recovery", "conditioning", "endurance", "general"]
+        discipline_options = "".join(
+            f"<option value='{d}' {'selected' if template['discipline'] == d else ''}>{d}</option>" for d in disciplines
+        )
+
+        return render_page(
+            "Edit Template",
+            f"""
+            <h1>Edit Template</h1>
+            <form method='post' action='/templates/{int(template['id'])}/edit'>
+              <div class='card'>
+                <label>Name<br/><input name='name' value='{template['name']}' required /></label><br/>
+                <label>Discipline<br/><select name='discipline'>{discipline_options}</select></label><br/>
+                <label>Minutes<br/><input type='number' min='1' name='duration_minutes' value='{int(template['duration_minutes'])}' required /></label><br/>
+                <label>Level<br/><select name='level'>{level_options}</select></label>
+              </div>
+              {''.join(block_rows) if block_rows else "<p class='muted'>No blocks to edit.</p>"}
+              <button class='cta' type='submit'>Save Template</button>
+            </form>
+            """,
+        )
+
+    @app.post("/templates/<int:template_id>/edit")
+    def template_edit_save(template_id: int):
+        name = (request.form.get("name") or "").strip()
+        discipline = (request.form.get("discipline") or "general").strip() or "general"
+        level = (request.form.get("level") or "all_levels").strip() or "all_levels"
+        try:
+            duration_minutes = max(1, int(request.form.get("duration_minutes") or 30))
+        except ValueError:
+            duration_minutes = 30
+
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            template = conn.execute("SELECT id, json_blocks FROM session_template WHERE id = ?", (template_id,)).fetchone()
+            if template is None:
+                return jsonify({"error": "template_not_found"}), 404
+
+            blocks = blocks_from_json(template["json_blocks"])
+            for idx, block in enumerate(blocks):
+                raw_media = request.form.get(f"media_id_{idx}")
+                try:
+                    block["media_id"] = int(raw_media) if raw_media else None
+                except ValueError:
+                    block["media_id"] = None
+
+            conn.execute(
+                "UPDATE session_template SET name = ?, discipline = ?, duration_minutes = ?, level = ?, json_blocks = ? WHERE id = ?",
+                (name or "Untitled Template", discipline, duration_minutes, level, json.dumps({"blocks": blocks}), template_id),
+            )
+            conn.commit()
+
+        return redirect(url_for("template_edit", template_id=template_id))
 
     @app.get("/api/export/backup")
     def export_backup():
