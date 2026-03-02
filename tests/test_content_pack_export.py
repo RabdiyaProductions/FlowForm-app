@@ -185,3 +185,25 @@ def test_restore_reports_missing_media_references_without_crash(tmp_path):
     assert payload["ok"] is True
     assert payload["warnings"]
     assert payload["warnings"][0]["code"] == "missing_media_references"
+
+
+def test_navigation_and_empty_state_ctas_are_visible(tmp_path):
+    app = create_app(
+        {
+            "TESTING": True,
+            "DB_PATH": str(tmp_path / "test.db"),
+            "MEDIA_DIR": str(tmp_path / "media"),
+        }
+    )
+    client = app.test_client()
+
+    templates_html = client.get("/templates").get_data(as_text=True)
+    assert "Content Packs" in templates_html
+    assert "Import Content Pack" in templates_html
+
+    media_html = client.get("/media").get_data(as_text=True)
+    assert "Upload Media" in media_html
+
+    packs_html = client.get("/content-packs/ui").get_data(as_text=True)
+    assert "Import Pack ZIP" in packs_html
+    assert 'name="viewport"' in packs_html
