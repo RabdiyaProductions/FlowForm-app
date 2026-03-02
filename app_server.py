@@ -602,6 +602,9 @@ def blocks_from_json(raw: str) -> list[dict]:
         except (TypeError, ValueError):
             minutes_int = 0
         media_item_id = block.get("media_item_id")
+        media_id = block.get("media_id")
+        if media_item_id is None and media_id is not None:
+            media_item_id = media_id
         try:
             media_item_id = int(media_item_id) if media_item_id is not None else None
         except (TypeError, ValueError):
@@ -611,6 +614,7 @@ def blocks_from_json(raw: str) -> list[dict]:
             "minutes": minutes_int,
             "seconds": minutes_int * 60,
             "media_item_id": media_item_id,
+            "media_id": media_item_id,
         })
     return normalized
 
@@ -644,7 +648,7 @@ def detect_media_type(filename: str, mimetype_header: str | None) -> str:
 
 
 def enrich_blocks_with_media(connection: sqlite3.Connection, blocks: list[dict]) -> list[dict]:
-    media_ids = sorted({int(b.get("media_item_id")) for b in blocks if b.get("media_item_id")})
+    media_ids = sorted({int(b.get("media_item_id") or b.get("media_id")) for b in blocks if (b.get("media_item_id") or b.get("media_id"))})
     media_map: dict[int, dict] = {}
     if media_ids:
         placeholders = ",".join("?" for _ in media_ids)
@@ -658,14 +662,12 @@ def enrich_blocks_with_media(connection: sqlite3.Connection, blocks: list[dict])
     hydrated = []
     for block in blocks:
         item = dict(block)
-        mid = item.get("media_item_id")
+        mid = item.get("media_item_id") or item.get("media_id")
+        item["media_item_id"] = int(mid) if mid else None
+        item["media_id"] = int(mid) if mid else None
         item["media"] = media_map.get(int(mid)) if mid else None
         hydrated.append(item)
     return hydrated
-
-
-        normalized.append({"name": name, "minutes": minutes_int, "seconds": minutes_int * 60})
-    return normalized
 
 def compute_readiness_score(sleep_hours: float, stress: int, soreness: int, mood: int) -> tuple[int, str]:
     # Explainable weighted score out of 100.
@@ -2068,6 +2070,24 @@ def create_app(port: int | None = None) -> Flask:
         if not safe:
             return jsonify({"error": "invalid_filename"}), 400
         path = MEDIA_DIR / safe
+        if not path.exists() or not path.is_file():
+            return jsonify({"error": "media_not_found"}), 404
+        return send_file(path)
+
+    @app.get("/media/<int:media_id>")
+    @require_login
+    def media_file_by_id(media_id: int):
+        connection = sqlite3.connect(db_path)
+        connection.row_factory = sqlite3.Row
+        user_id = current_user_id(connection)
+        row = connection.execute(
+            "SELECT id, filename FROM media_item WHERE id = ? AND user_id = ?",
+            (media_id, user_id),
+        ).fetchone()
+        connection.close()
+        if row is None:
+            return jsonify({"error": "media_not_found"}), 404
+        path = MEDIA_DIR / row["filename"]
         if not path.exists() or not path.is_file():
             return jsonify({"error": "media_not_found"}), 404
         return send_file(path)
