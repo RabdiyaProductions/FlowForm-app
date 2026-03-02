@@ -223,3 +223,15 @@ Recovery drill:
 - block-level `media_id` is persisted in template blocks,
 - player page shows attached media details,
 - player provides preview/play/download controls for attached media.
+
+## Journey 18 — Backup/restore preserves media and reports missing references safely
+**Steps**
+1. Trigger `GET /api/export/backup` and download ZIP.
+2. Wipe current DB/media state.
+3. Restore via `POST /api/import/backup`.
+4. Open session/player or media URLs for templates restored from backup.
+
+**Accept if**
+- backup ZIP contains `flowform.db`, `flowform_backup.json`, and `media/*` files,
+- restore recreates DB + media files so previously referenced media is still available,
+- if template blocks reference missing media, restore returns warnings/report and does not crash.

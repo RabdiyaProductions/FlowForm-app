@@ -2,6 +2,7 @@ import json
 import os
 import json
 import sqlite3
+import shutil
 import tempfile
 import zipfile
 from datetime import datetime, timezone
@@ -24,6 +25,11 @@ def blocks_from_json(raw: str) -> list[dict]:
         return []
     blocks = payload.get("blocks") if isinstance(payload, dict) else None
     return blocks if isinstance(blocks, list) else []
+
+
+def table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)).fetchone()
+    return row is not None
 
 
 def init_db(db_path: Path) -> None:
@@ -194,6 +200,11 @@ def create_app(test_config: dict | None = None) -> Flask:
             templates_payload = []
             for row in template_rows:
                 for block in blocks_from_json(row["json_blocks"]):
+                    block_ref = block.get("media_id")
+                    if block_ref is None:
+                        block_ref = block.get("media_item_id")
+                    try:
+                        media_id = int(block_ref) if block_ref is not None else None
                     try:
                         media_id = int(block.get("media_item_id")) if block.get("media_item_id") is not None else None
             template_payload = []
@@ -270,6 +281,113 @@ def create_app(test_config: dict | None = None) -> Flask:
             temp_path.unlink(missing_ok=True)
 
         return response
+
+    @app.get("/api/export/backup")
+    def export_backup():
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            templates = conn.execute(
+                "SELECT id, name, discipline, duration_minutes, json_blocks FROM session_template ORDER BY id ASC"
+            ).fetchall()
+            media_items = conn.execute(
+                "SELECT id, filename, media_type, tags FROM media_item ORDER BY id ASC"
+            ).fetchall()
+            packs_history_rows = []
+            if table_exists(conn, "packs_history"):
+                packs_history_rows = conn.execute("SELECT * FROM packs_history ORDER BY id ASC").fetchall()
+
+        snapshot = {
+            "exported_at": utc_now_iso(),
+            "templates": [dict(r) for r in templates],
+            "media": [dict(r) for r in media_items],
+            "packs_history": [dict(r) for r in packs_history_rows],
+        }
+
+        temp = tempfile.NamedTemporaryFile(prefix="flowform_backup_", suffix=".zip", delete=False)
+        temp_path = Path(temp.name)
+        temp.close()
+        with zipfile.ZipFile(temp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            if db_path.exists():
+                zf.write(db_path, arcname="flowform.db")
+            zf.writestr("flowform_backup.json", json.dumps(snapshot, indent=2))
+            if snapshot["packs_history"]:
+                zf.writestr("packs_history.json", json.dumps(snapshot["packs_history"], indent=2))
+            if media_dir.exists():
+                for item in media_dir.iterdir():
+                    if item.is_file():
+                        zf.write(item, arcname=f"media/{item.name}")
+
+        response = send_file(temp_path, mimetype="application/zip", as_attachment=True, download_name="flowform_full_backup.zip")
+
+        @response.call_on_close
+        def _cleanup_backup_temp() -> None:
+            temp_path.unlink(missing_ok=True)
+
+        return response
+
+    @app.post("/api/import/backup")
+    def import_backup():
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            return jsonify({"ok": False, "error": "file_required"}), 400
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="flowform_restore_"))
+        archive_path = temp_dir / "backup.zip"
+        upload.save(archive_path)
+
+        warnings = []
+        try:
+            with zipfile.ZipFile(archive_path, "r") as zf:
+                zf.extractall(temp_dir / "unzipped")
+
+            unzipped = temp_dir / "unzipped"
+            restored_db = unzipped / "flowform.db"
+            restored_media = unzipped / "media"
+            if restored_db.exists():
+                shutil.copy2(restored_db, db_path)
+
+            if media_dir.exists():
+                shutil.rmtree(media_dir)
+            media_dir.mkdir(parents=True, exist_ok=True)
+            if restored_media.exists():
+                for item in restored_media.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, media_dir / item.name)
+
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                media_rows = conn.execute("SELECT id, filename FROM media_item").fetchall()
+                media_lookup = {int(r["id"]): str(r["filename"]) for r in media_rows}
+                templates = conn.execute("SELECT id, json_blocks FROM session_template").fetchall()
+
+            missing = []
+            for row in templates:
+                for block in blocks_from_json(row["json_blocks"]):
+                    if block.get("media_id") is None and block.get("media_item_id") is None:
+                        continue
+                    media_ref = block.get("media_id") if block.get("media_id") is not None else block.get("media_item_id")
+                    if media_ref is None:
+                        continue
+                    try:
+                        media_id = int(media_ref)
+                    except (TypeError, ValueError):
+                        missing.append({"template_id": int(row["id"]), "media_id": media_ref, "reason": "invalid_media_id"})
+                        continue
+                    filename = media_lookup.get(media_id)
+                    if not filename:
+                        missing.append({"template_id": int(row["id"]), "media_id": media_id, "reason": "media_row_missing"})
+                        continue
+                    if not (media_dir / filename).exists():
+                        missing.append({"template_id": int(row["id"]), "media_id": media_id, "filename": filename, "reason": "media_file_missing"})
+
+            if missing:
+                warnings.append({"code": "missing_media_references", "items": missing})
+
+            return jsonify({"ok": True, "warnings": warnings})
+        except zipfile.BadZipFile:
+            return jsonify({"ok": False, "error": "invalid_zip"}), 400
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     @app.get("/templates/builder/<int:template_id>")
     def template_builder(template_id: int):

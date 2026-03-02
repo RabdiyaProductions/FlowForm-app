@@ -330,3 +330,15 @@ Exact steps:
 1. Open template builder for a template.
 2. Select media for one or more blocks and save.
 3. Open session player for that template and confirm embedded media controls render.
+
+### 10) Full-fidelity backup/restore for media and imported packs
+#### Backup API: `GET /api/export/backup`
+Behavior:
+- backup ZIP includes database (`flowform.db`), media payload (`media/*`), and exported JSON snapshot (`flowform_backup.json`),
+- includes `packs_history.json` when `packs_history` table is present.
+
+#### Restore API: `POST /api/import/backup`
+Behavior:
+- restores DB and media from backup ZIP,
+- performs post-restore media reference validation against template block `media_id`/`media_item_id`,
+- missing media references are returned as warnings/report (no crash).

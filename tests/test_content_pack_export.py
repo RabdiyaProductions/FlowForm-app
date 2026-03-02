@@ -102,3 +102,86 @@ def test_media_attachment_renders_on_player_page(tmp_path):
     html = player_resp.get_data(as_text=True)
     assert "Attached media: demo.mp4" in html
     assert "/media/file/demo.mp4" in html
+
+
+def test_backup_zip_includes_database_media_and_snapshot(tmp_path):
+    db_path = tmp_path / "test.db"
+    media_dir = tmp_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    app = create_app(
+        {
+            "TESTING": True,
+            "DB_PATH": str(db_path),
+            "MEDIA_DIR": str(media_dir),
+        }
+    )
+    client = app.test_client()
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO media_item (filename, media_type, tags) VALUES (?, ?, ?)",
+            ("keep.mp4", "video", "backup"),
+        )
+        conn.execute(
+            "INSERT INTO session_template (name, discipline, duration_minutes, json_blocks) VALUES (?, ?, ?, ?)",
+            ("Backup Template", "strength", 12, json.dumps({"blocks": [{"name": "x", "minutes": 12}]})),
+        )
+        conn.commit()
+    (media_dir / "keep.mp4").write_bytes(b"media")
+
+    response = client.get("/api/export/backup")
+    assert response.status_code == 200
+    assert response.mimetype == "application/zip"
+
+    with zipfile.ZipFile(io.BytesIO(response.data)) as archive:
+        names = set(archive.namelist())
+        assert "flowform.db" in names
+        assert "flowform_backup.json" in names
+        assert "media/keep.mp4" in names
+
+
+def test_restore_reports_missing_media_references_without_crash(tmp_path):
+    source_db = tmp_path / "source.db"
+    source_media = tmp_path / "source_media"
+    source_media.mkdir(parents=True, exist_ok=True)
+    source_app = create_app({"TESTING": True, "DB_PATH": str(source_db), "MEDIA_DIR": str(source_media)})
+    source_client = source_app.test_client()
+
+    with sqlite3.connect(source_db) as conn:
+        conn.execute("INSERT INTO media_item (filename, media_type, tags) VALUES (?, ?, ?)", ("lost.mp4", "video", "x"))
+        media_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+        conn.execute(
+            "INSERT INTO session_template (name, discipline, duration_minutes, json_blocks) VALUES (?, ?, ?, ?)",
+            ("Broken Media Template", "cardio", 15, json.dumps({"blocks": [{"name": "b", "minutes": 15, "media_id": media_id}]})),
+        )
+        conn.commit()
+
+    backup_response = source_client.get("/api/export/backup")
+    backup_bytes = backup_response.data
+
+    mutated = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(backup_bytes), "r") as zin:
+        with zipfile.ZipFile(mutated, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                if info.filename.startswith("media/"):
+                    continue
+                zout.writestr(info, zin.read(info.filename))
+    mutated.seek(0)
+
+    restore_db = tmp_path / "restore.db"
+    restore_media = tmp_path / "restore_media"
+    restore_media.mkdir(parents=True, exist_ok=True)
+    restore_app = create_app({"TESTING": True, "DB_PATH": str(restore_db), "MEDIA_DIR": str(restore_media)})
+    restore_client = restore_app.test_client()
+
+    response = restore_client.post(
+        "/api/import/backup",
+        data={"file": (mutated, "backup.zip")},
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["warnings"]
+    assert payload["warnings"][0]["code"] == "missing_media_references"
